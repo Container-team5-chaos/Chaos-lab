@@ -1,7 +1,19 @@
+# python
 __pycache__/
 *.pyc
 .venv/
 *.egg-info/
+
+# terraform
 .terraform/
 *.tfstate*
+
+# secrets
 .env
+.env.*
+*.pem
+*.key
+*.tfvars
+!*.tfvars.example
+kubeconfig
+.aws/
