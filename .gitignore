@@ -18,3 +18,6 @@ __pycache__/
 !*.tfvars.example
 kubeconfig
 .aws/
+
+# judge 산출물(설계 2, 7.6). 대표 결과만 팀 합의 뒤 docs/results/에 커밋한다
+runs/
