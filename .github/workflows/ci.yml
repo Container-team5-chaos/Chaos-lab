@@ -41,3 +41,16 @@ jobs:
         run: |
           echo "$BRANCH" | grep -Eq '^(feat|fix|refactor|test|docs|infra|chore|ci)/' \
             || (echo "브랜치 이름 규칙 위반: $BRANCH" && exit 1)
+
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: orchestrator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: pytest -q -m "not pg and not k6"
