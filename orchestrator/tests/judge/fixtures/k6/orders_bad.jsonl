@@ -1,0 +1,14 @@
+{"kind":"run_start","v":1,"run":"r-test","script_ver":"0.1.0","seed":42,"profile":"smoke","plan":{"executor":"ramping-arrival-rate","time_unit_s":60,"start_rate":0,"stages":[{"duration_s":0,"target":180},{"duration_s":10,"target":180}]},"symbols":["REPLAY:UPBIT:KRW-BTC","REPLAY:UPBIT:KRW-ETH"],"initial_cash":10000000,"conn_reuse":false,"t":1762299940000,"ws_reconnect":false}
+{"kind":"account","run":"r-test","idx":0,"acct":"00000000-0000-4000-8000-00000000000a","nick":"k6-r-test-0"}
+{"kind":"setup_done","run":"r-test","accounts":1,"t":1762299999000}
+
+{"kind":"intent","run":"r-test","key":"6a1f0c2e-5b7d-4c11-9e2a-000000000001","acct":"00000000-0000-4000-8000-00000000000a","vu":1,"t":1762300000000,"body":"{\"limit_price\":\"105000000\",\"qty\":\"0.00010000\",\"side\":\"buy\",\"symbol\":\"REPLAY:UPBIT:KRW-BTC\"}"}
+{"kind":"intent","run":"r-test","key":"6a1f0c2e-5b7d-4c11-9e
+{"kind":"mystery","run":"r-test"}
+{"kind":"result","run":"r-test","key":"6a1f0c2e-5b7d-4c11-9e2a-000000000001","atts":[{"n":1,"t0":1762300000000,"t1":1762300000012,"st":201,"ec":null,"ms":12}],"lookup":null,"ack":{"st":201,"raw":"{\"fee\":5,\"price\":\"100000000\",\"reason\":null,\"status\":\"FILLED\"}"},"t":1762300000112}
+{"kind":"ws_open","vu":3,"conn":1,"t":1762300000000}
+[1,2,3]
+{"kind":"intent","run":"r-test","key":"a","key":"b"}
+{"kind":"result","run":"r-test","key":"6a1f0c2e-5b7d-4c11-9e2a-000000000001","atts":[{"n":1,"t0":1762300000000,"t1":1762300000012,"st":201,"ec":null,"ms":NaN}],"lookup":null,"ack":{"st":201,"raw":"{\"fee\":5,\"price\":\"100000000\",\"reason\":null,\"status\":\"FILLED\"}"},"resend":{"atts":[{"n":1,"t0":1762300030000,"t1":1762300030005,"st":200,"ec":null,"ms":5}],"ack":{"st":200,"raw":"{\"fee\":5,\"price\":\"100000000\",\"reason\":null,\"status\":\"FILLED\"}"}},"t":1762300000112}
+{"kind":"intent","run":"r-test","key":"6a1f0c2e-5b7d-4c11-9e2a-000000000003","acct":"00000000-0000-4000-8000-00000000000a","vu":1,"t":1762300002,"body":"{\"limit_price\":\"105000000\",\"qty\":\"0.00010000\",\"side\":\"buy\",\"symbol\":\"REPLAY:UPBIT:KRW-BTC\"}"}
+{"kind":"result","run":"r-test","key":"6
