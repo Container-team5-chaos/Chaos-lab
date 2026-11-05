@@ -1,0 +1,15 @@
+{
+  "schema": "chaos.run/v1",
+  "run_id": "r-offline-ok",
+  "experiment": "offline-ok",
+  "criteria": "criteria.yaml",
+  "k6": {
+    "job": "k6-r-offline-ok"
+  },
+  "replay_speed": [
+    {
+      "from_ms": 1762299940000,
+      "speed": 1
+    }
+  ]
+}
