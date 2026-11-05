@@ -1,0 +1,6 @@
+# order-api-pod-kill: kubectl delete pod(정상 종료, L514). 응답 손실이 없어야 한다(설계 6)
+extends: default.yaml
+fault_effect: [{id: pod_replaced, observe: pod_replaced, target: order-api, within_s: 120}]
+checks:
+  - {id: unresolved_zero, kind: unresolved, class: [UNRESOLVED_COMMITTED, UNRESOLVED_ABSENT], phases: [fault, recovery], op: '==', value: 0}
+  - {id: order_recovery_k6, kind: client, stat: recovery, required: false}   # 2차에 required

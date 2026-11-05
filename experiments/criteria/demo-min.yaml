@@ -1,0 +1,5 @@
+# demo-min(시연): 장애 키는 발표자 replay 계좌다(L112, L281). Prometheus 없이 낸다(설계 6, 3절 시연)
+extends: default.yaml
+require_extra_accounts: true                   # run.json 또는 judge mark --extra-account
+fault_effect: [{id: presenter_crash, observe: crash_restart, target: order-api, min: 1}]
+checks: [{id: order_p95_k6, required: false}, {id: order_err_k6, required: false}]
