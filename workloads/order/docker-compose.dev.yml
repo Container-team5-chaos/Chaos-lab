@@ -1,0 +1,15 @@
+# 로컬 개발용! E의 kind 환경이 나오기 전까지 PostgreSQL과 Redis만 띄움
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: exchange
+      POSTGRES_PASSWORD: exchange
+      POSTGRES_DB: exchange
+    ports: ["5432:5432"]
+    volumes:
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+      - ./db/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]

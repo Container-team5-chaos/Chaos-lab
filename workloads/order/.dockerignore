@@ -1,0 +1,5 @@
+tests/
+db/
+__pycache__/
+*.pyc
+docker-compose.dev.yml
