@@ -1,0 +1,39 @@
+# kube-prometheus-stack (chart 92.21.1) — 로컬 kind용
+# 사용: 파트 a, b
+
+prometheus:
+  prometheusSpec:
+    # 짧은 장애 및 복구 구간: 기본 30s보다 짧게
+    scrapeInterval: 5s
+    evaluationInterval: 5s
+    retention: 1d
+    # k6 결과를 remote write로 받음 (--out experimental-prometheus-rw)
+    enableRemoteWriteReceiver: true
+    # ServiceMonitor/PodMonitor/PrometheusRule을 Helm release 라벨 없이 수집
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 400Mi
+
+grafana:
+  # 로컬 전용 계정: 공유 환경에서는 Secret으로 변경 필요
+  adminUser: admin
+  adminPassword: admin
+
+# 로컬에서는 불필요하거나 kind에서 수집이 실패하는 구성 요소를 끔
+alertmanager:
+  enabled: false
+nodeExporter:
+  # Docker Desktop(mac) 환경에서 root mount 문제로 기동 실패는 경우 끔
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false

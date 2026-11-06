@@ -1,0 +1,15 @@
+# Chaos Mesh (chart 2.8.7) — 로컬 kind용
+
+controllerManager:
+  # EK: 3개 + leader election (로컬 1개)
+  replicaCount: 1
+
+chaosDaemon:
+  # kind 노드: containerd 사용 (docker로 두면 NetworkChaos 등이 실패)
+  runtime: containerd
+  socketPath: /run/containerd/containerd.sock
+
+dashboard:
+  create: true
+  # 로컬 데모용: 토큰 입력 없이 대시보드 사용
+  securityMode: false

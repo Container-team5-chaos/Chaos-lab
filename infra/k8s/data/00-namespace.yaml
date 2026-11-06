@@ -1,0 +1,5 @@
+# 거래소 서비스와 데이터 저장소 공용 namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: exchange
