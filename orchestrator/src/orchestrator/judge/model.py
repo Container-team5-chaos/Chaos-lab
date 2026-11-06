@@ -1,4 +1,4 @@
-"""judge 공용 데이터 모델(설계 4.6, 5.1–5.8, 계약 정렬 명세 1–8).
+"""judge 공용 데이터 모델(설계 4.6, 5.1–5.8, 계약 명세 1–8).
 
 - 계약은 실제 주문 서비스(workloads/order, 커밋 6e8f38b)다. 옛 설계 명세의 Idempotency-Key 헤더,
   `/api/orders`, 주문 조회, fills·reconcile_runs 테이블, 수수료·cost_basis는 없다.
@@ -23,14 +23,14 @@ from typing import Any
 
 RUN_SCHEMA = "chaos.run/v1"
 VERDICT_SCHEMA = "papertrade.verdict/v1"
-JSONL_VERSION = 2  # 명세 2. v1(lookup·resend·ack)을 대체한다
+JSONL_VERSION = 2  # 계약 명세 2. v1(lookup·resend·ack)을 대체한다
 
 EXAMPLES_MAX = 20  # 설계 5.8 클래스·불변식별 예시 상한
 
-# ---------------------------------------------------------------- 주문 서비스 계약(명세 1)
+# ---------------------------------------------------------------- 주문 서비스 계약(계약 명세 1)
 
 ORDER_PATH = "/orders"
-ORDER_ID_FIELD = "order_id"  # ACK 판정 필드(명세 3)
+ORDER_ID_FIELD = "order_id"  # ACK 판정 필드(계약 명세 3)
 REPLAYED_FIELD = "replayed"
 STATUS_FILLED = "filled"
 STATUS_REJECTED = "rejected"
@@ -46,7 +46,7 @@ USER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$")
 
 
 class RejectReason(StrEnum):
-    """거절 본문 reason(명세 1). 값은 서비스 문자열 그대로다."""
+    """거절 본문 reason(계약 명세 1). 값은 서비스 문자열 그대로다."""
 
     INVALID_REQUEST = "invalid_request"  # 400
     USER_NOT_FOUND = "user_not_found"  # 404
@@ -58,7 +58,7 @@ class RejectReason(StrEnum):
     NOT_READY = "not_ready"  # 503, 종료 중 또는 연결 오류(커밋 뒤일 수 있다)
 
 
-# 시도 성격(명세 3). 상수 집합으로만 판정한다.
+# 시도 성격(계약 명세 3). 상수 집합으로만 판정한다.
 ACK_STATUS = 200
 # 확정 거절. 그 시도는 저장하지 않는다. 같은 키의 처리 중인 앞 시도는 나중에 커밋될 수 있다
 # (앞 시도가 잠금을 쥔 동안 재전송이 기다렸다가 바뀐 잔고로 422를 받는 경우, app/orders.py)
@@ -71,12 +71,12 @@ TRANSPORT_ERROR_STATUS = 0  # k6 전송 오류·타임아웃
 # 기본값(근거: app/config.py, db/seed.sql)
 DEFAULT_MARKETS = ("KRW-BTC",)
 DEFAULT_USER_PATTERN = r"^user-[0-9]{4}$"
-DEFAULT_USER_MAX = 1000  # seed user-0001..user-1000(명세 11)
+DEFAULT_USER_MAX = 1000  # seed user-0001..user-1000(계약 명세 11)
 _USER_NUM_RE = re.compile(r"([0-9]+)\Z")  # user_id 끝 숫자 묶음(user_max 범위 검사)
 DEFAULT_INITIAL_KRW = "10000000"
 DEFAULT_STALE_MS = 5000
 
-# ---------------------------------------------------------------- DB 계약(명세 1, 6)
+# ---------------------------------------------------------------- DB 계약(계약 명세 1, 6)
 
 ACCOUNT_COLUMNS = ("user_id", "krw")
 POSITION_COLUMNS = ("user_id", "market", "volume", "avg_price")
@@ -101,17 +101,17 @@ FINGERPRINT_COLUMNS = (
     "positions",
     "volume_sum",
 )
-# 비교 규칙(명세 5): 숫자는 Decimal, 시각은 instant(µs), id는 int, 나머지는 문자열 그대로.
-# 응답 시각은 응답에 적힌 소수 자릿수까지만 비교한다(명세 11, classify._same_instant)
+# 비교 규칙(계약 명세 5): 숫자는 Decimal, 시각은 instant(µs), id는 int, 나머지는 문자열 그대로.
+# 응답 시각은 응답에 적힌 소수 자릿수까지만 비교한다(계약 명세 11, classify._same_instant)
 ORDER_DECIMAL_COLUMNS = frozenset({"volume", "fill_price", "amount"})
 ORDER_TIME_COLUMNS = frozenset({"created_at", "filled_at"})
 ORDER_INT_COLUMNS = frozenset({"id"})
-# 보낸 본문 대 DB 행 비교 필드(BODY_MISMATCH, 명세 4). 서비스 same_request와 같다
+# 보낸 본문 대 DB 행 비교 필드(BODY_MISMATCH, 계약 명세 4). 서비스 same_request와 같다
 ORDER_BODY_FIELDS = ("user_id", "market", "side", "volume")
-# intent.body 필드(명세 2)
+# intent.body 필드(계약 명세 2)
 INTENT_BODY_FIELDS = ("client_order_id", *ORDER_BODY_FIELDS)
 
-# DB 스냅샷 구획 이름(psql `--@ <name>`, 명세 6). 불변식 SQL 구획은 "inv_<id>"다.
+# DB 스냅샷 구획 이름(psql `--@ <name>`, 계약 명세 6). 불변식 SQL 구획은 "inv_<id>"다.
 SNAPSHOT_SECTIONS = (
     "fingerprint1",
     "accounts",
@@ -121,9 +121,9 @@ SNAPSHOT_SECTIONS = (
     "schema",
     "fingerprint2",
 )
-ORDERS_WARN_ROWS = 1_000_000  # 넘으면 경고만(SNAPSHOT_LARGE, 명세 6)
+ORDERS_WARN_ROWS = 1_000_000  # 넘으면 경고만(SNAPSHOT_LARGE, 계약 명세 6)
 
-# 불변식 id(명세 7). 기준 YAML integrity 항목 sql: 목록 값이고 결과 id다.
+# 불변식 id(계약 명세 7). 기준 YAML integrity 항목 sql: 목록 값이고 결과 id다.
 # 키 이름 sql:은 옛 이름이다. "DB 스냅샷만으로 판정하는 불변식"이라는 뜻이고,
 # 계산 위치(SQL 구획 inv_<id> 또는 스냅샷 Python)는 invariants 모듈이 정한다.
 INVARIANTS = ("cash", "qty", "avg", "nonneg", "arith", "constraints")
@@ -131,7 +131,7 @@ INVARIANTS = ("cash", "qty", "avg", "nonneg", "arith", "constraints")
 INTEGRITY_CHECKS = ("fresh",)
 INVARIANT_IDS = INVARIANTS + INTEGRITY_CHECKS
 
-# 응답 필드 매핑 기본값(명세 5). 키 = 응답 JSON 필드, 값 = orders 열.
+# 응답 필드 매핑 기본값(계약 명세 5). 키 = 응답 JSON 필드, 값 = orders 열.
 # 근거: workloads/order/app/schemas.py order_to_dict(커밋 6e8f38b)
 DEFAULT_RESPONSE_FIELDS = {
     "order_id": "id",
@@ -145,7 +145,7 @@ DEFAULT_RESPONSE_FIELDS = {
     "amount": "amount",
     "filled_at": "filled_at",
 }
-# 분류 입력이지 비교 필드가 아니다(명세 5). response_fields 키로 쓸 수 없다.
+# 분류 입력이지 비교 필드가 아니다(계약 명세 5). response_fields 키로 쓸 수 없다.
 NON_COMPARE_FIELDS = frozenset({REPLAYED_FIELD, "reason"})
 
 
@@ -208,7 +208,7 @@ _TS_FRAC_RE = re.compile(
 
 
 def ts_digits(v: str) -> int | None:
-    """시각 문자열의 초 소수 자릿수(명세 11). 초까지 적지 않은 형식이면 None.
+    """시각 문자열의 초 소수 자릿수(계약 명세 11). 초까지 적지 않은 형식이면 None.
 
     "…:40.005Z" → 3, "…:40.005123+00:00" → 6, "…:40+00:00" → 0(isoformat은 µs가 0이면 소수부를 뺀다).
     """
@@ -225,7 +225,7 @@ def iso_us(us: int, sep: str = "T") -> str:
 
 
 def order_value(column: str, v: Any) -> Any:
-    """orders 열 하나의 비교용 값(명세 5). 응답 값과 DB 값을 같은 함수로 바꿔 == 로 비교한다.
+    """orders 열 하나의 비교용 값(계약 명세 5). 응답 값과 DB 값을 같은 함수로 바꿔 == 로 비교한다.
 
     ORDER_DECIMAL_COLUMNS → Decimal(표기 차이 무시), ORDER_TIME_COLUMNS → epoch µs
     (문자열은 ts_us, int는 이미 µs로 본다), id → int, 나머지 → 그대로. None은 None.
@@ -262,7 +262,7 @@ def _parse_raw(raw: str | None) -> Mapping[str, Any] | None:
     return v if isinstance(v, dict) else None
 
 
-# ---------------------------------------------------------------- run 키(명세 2)
+# ---------------------------------------------------------------- run 키(계약 명세 2)
 
 
 def run_key_prefix(run_id: str) -> str:
@@ -297,7 +297,7 @@ class Outcome(StrEnum):
 
 
 class AttemptKind(StrEnum):
-    """시도 하나의 성격(명세 3)."""
+    """시도 하나의 성격(계약 명세 3)."""
 
     ACK = "ACK"  # 200이고 raw가 order_id 있는 JSON 객체
     # 확정 거절. 서버가 INSERT 전에 거절해 그 시도는 저장하지 않는다(같은 키의 처리 중인
@@ -308,7 +308,7 @@ class AttemptKind(StrEnum):
 
 
 class KState(StrEnum):
-    """키별 클라이언트 상태 K(명세 3)."""
+    """키별 클라이언트 상태 K(계약 명세 3)."""
 
     K_ACK = "K_ACK"  # ACK 시도가 하나라도 있다. 첫 ACK 본문이 원 응답이다
     K_REJECT = "K_REJECT"  # ACK 없음, 마지막 시도가 확정 거절
@@ -317,7 +317,7 @@ class KState(StrEnum):
 
 
 class OrderClass(StrEnum):
-    """주문 분류 클래스(명세 4). 값은 기준 YAML class: 목록과 같다."""
+    """주문 분류 클래스(계약 명세 4). 값은 기준 YAML class: 목록과 같다."""
 
     OK = "OK"
     MISMATCH = "MISMATCH"  # K_ACK × D1, 원 응답 필드 ≠ DB 행
@@ -341,7 +341,7 @@ class OrderClass(StrEnum):
     INTERRUPTED = "INTERRUPTED"
 
 
-# 완료 기준 용어 대응(명세 4, 9 default.yaml)
+# 완료 기준 용어 대응(계약 명세 4, 9 default.yaml)
 LOSS_CLASSES = frozenset({OrderClass.LOST, OrderClass.REJECT_COMMITTED})
 DUPLICATE_CLASSES = frozenset(
     {
@@ -362,7 +362,7 @@ DB_ONLY_CLASSES = frozenset(
 
 
 class OkSub(StrEnum):
-    """OK 세부(명세 4). 값은 기준 YAML class_sub: 목록과 같다."""
+    """OK 세부(계약 명세 4). 값은 기준 YAML class_sub: 목록과 같다."""
 
     CLEAN = "clean"  # 첫 시도가 ACK이고 rp=false
     AFTER_COMMIT = (
@@ -376,7 +376,7 @@ class OkSub(StrEnum):
 
 
 class IdemViolation(StrEnum):
-    """멱등 위반(명세 4). 하나라도 있으면 IDEMPOTENCY_VIOLATION으로 센다."""
+    """멱등 위반(계약 명세 4). 하나라도 있으면 IDEMPOTENCY_VIOLATION으로 센다."""
 
     DOUBLE_CREATE = "DOUBLE_CREATE"  # rp=false ACK가 2번 이상이고 order_id가 다르다
     FIRST_REPLAYED = "FIRST_REPLAYED"  # n=1 ACK인데 rp=true(키 충돌·서버 결함)
@@ -384,7 +384,7 @@ class IdemViolation(StrEnum):
     SAME_BODY_409 = "409_SAME_BODY"  # 409를 받았는데 그 키의 전송 본문이 모두 같다
 
 
-# RESEND_DIFF 비교 필드(명세 4). 응답 JSON 필드 이름이다.
+# RESEND_DIFF 비교 필드(계약 명세 4). 응답 JSON 필드 이름이다.
 RESEND_COMPARE_FIELDS = (
     ORDER_ID_FIELD,
     "user_id",
@@ -397,11 +397,11 @@ RESEND_COMPARE_FIELDS = (
 )
 
 
-# ---------------------------------------------------------------- k6 기록(JSONL v2, 명세 2)
+# ---------------------------------------------------------------- k6 기록(JSONL v2, 계약 명세 2)
 
 
 def attempt_kind(st: int, ec: str | None, raw: str | None) -> AttemptKind:
-    """시도 성격(명세 3). 상수 집합만 본다.
+    """시도 성격(계약 명세 3). 상수 집합만 본다.
 
     - ACK: st == 200이고 raw가 JSON 객체이며 order_id 값이 있다.
     - REJECT: st ∈ {400, 404, 409, 422}, 또는 st == 503이고 ec ∈ {price_unavailable, stale_price}.
@@ -491,7 +491,7 @@ class Intent:
 
     @property
     def consistent(self) -> bool:
-        """key·acct가 본문과 맞으면 True. 아니면 PROTOCOL·안전 위반이다(명세 2)."""
+        """key·acct가 본문과 맞으면 True. 아니면 PROTOCOL·안전 위반이다(계약 명세 2)."""
         return (
             self.body.get("client_order_id") == self.key
             and self.body.get("user_id") == self.acct
@@ -514,7 +514,7 @@ class Result:
 
     @property
     def first_ack(self) -> Attempt | None:
-        """첫 ACK. 그 본문이 원 응답이다(명세 3)."""
+        """첫 ACK. 그 본문이 원 응답이다(계약 명세 3)."""
         return next((a for a in self.atts if a.is_ack), None)
 
     @property
@@ -529,11 +529,11 @@ class Result:
 @dataclass(frozen=True)
 class RunStart:
     """JSONL v2 run_start = {type:"run_start", v:2, run, script_ver, seed, profile, plan,
-    symbols, initial_cash, conn_reuse, vus, t, ...}. v1 필드를 유지한다(명세 2).
+    symbols, initial_cash, conn_reuse, vus, t, ...}. v1 필드를 유지한다(계약 명세 2).
 
     plan = {executor, time_unit_s, start_rate, stages:[{duration_s, target}]}.
     symbols: 주문 종목(market, 예: KRW-BTC). initial_cash: 참고용(판정은 integrity.initial_krw).
-    conn_reuse: 남겨 두지만 판정에 쓰지 않는다(명세 2, 4).
+    conn_reuse: 남겨 두지만 판정에 쓰지 않는다(계약 명세 2, 4).
     vus: VU 수(1 VU = 1 user). extra: 위에 없는 키.
     """
 
@@ -557,7 +557,7 @@ class AccountRec:
 
     idx: VU 오름차순 순번(0부터). 한 user를 여러 VU가 쓰면 가장 작은 VU로 정한다.
       기준 YAML fault_effect의 `account: idx<n>`이 이 idx다.
-    vus: 이 user를 쓴 VU(정렬). 1 VU = 1 user면 원소가 하나다(safety 가드, 명세 8).
+    vus: 이 user를 쓴 VU(정렬). 1 VU = 1 user면 원소가 하나다(safety 가드, 계약 명세 8).
     """
 
     idx: int
@@ -579,7 +579,7 @@ def derive_accounts(intents: Iterable[Intent]) -> tuple[AccountRec, ...]:
 
 @dataclass(frozen=True)
 class K6Log:
-    """orders.jsonl(v2) 파싱 결과(명세 2, 설계 5.3 기록 완전성).
+    """orders.jsonl(v2) 파싱 결과(계약 명세 2, 설계 5.3 기록 완전성).
 
     intents·results: client_order_id → 기록. 같은 키가 두 번 나오면 첫 줄을 쓰고 problems에 적는다.
     problems: 파싱 문제 설명(깨진 줄, run 값 여러 개, run_start 2개 등). 비면 문제 없음.
@@ -627,7 +627,7 @@ class K6Log:
         return None
 
 
-# ---------------------------------------------------------------- DB 스냅샷(명세 6)
+# ---------------------------------------------------------------- DB 스냅샷(계약 명세 6)
 
 
 @dataclass(frozen=True)
@@ -653,7 +653,7 @@ _ORDER_TIME_ATTR = {"created_at": "created_us", "filled_at": "filled_us"}
 
 @dataclass(frozen=True)
 class DbOrder:
-    """orders 행(명세 6 열 전부). 시각은 epoch µs다(timestamptz는 µs 정밀도).
+    """orders 행(계약 명세 6 열 전부). 시각은 epoch µs다(timestamptz는 µs 정밀도).
 
     지금 서비스는 status 'filled'만 넣는다. 체결 열(fill_price, amount, filled_us)은
     filled가 아니면 NULL일 수 있다.
@@ -698,7 +698,7 @@ class DbTick:
 
 @dataclass(frozen=True)
 class SchemaItem:
-    """schema 구획 한 행(constraints 검사 입력, 명세 6–7).
+    """schema 구획 한 행(constraints 검사 입력, 계약 명세 6–7).
 
     kind: "table" | "column" | "constraint".
     table: 테이블 이름. name: table이면 테이블 이름, column이면 열 이름, constraint면 제약 이름.
@@ -714,7 +714,7 @@ class SchemaItem:
 
 @dataclass(frozen=True)
 class Fingerprint:
-    """지문(명세 6). 스냅샷 트랜잭션 앞(F1)·뒤(F2)에 잰다. 빈 표의 max·sum은 None(SQL NULL).
+    """지문(계약 명세 6). 스냅샷 트랜잭션 앞(F1)·뒤(F2)에 잰다. 빈 표의 max·sum은 None(SQL NULL).
 
     Decimal 비교라 "10.0"과 "10.00"은 같다.
     """
@@ -749,7 +749,7 @@ def compute_fingerprint(
 
 @dataclass(frozen=True)
 class DbSnapshot:
-    """psql 1회 결과(명세 6). accounts·positions·orders는 전체 행, ticks는 run 범위만이다.
+    """psql 1회 결과(계약 명세 6). accounts·positions·orders는 전체 행, ticks는 run 범위만이다.
 
     fingerprint1·2: 구획이 없으면 None.
     sections: 받은 구획 이름(SNAPSHOT_SECTIONS, "inv_<id>"). 빠진 구획의 기준만 DB_ERROR다.
@@ -808,7 +808,7 @@ class DbSnapshot:
         return {k: tuple(sorted(v, key=lambda o: o.id)) for k, v in sorted(out.items())}
 
     def orders_by_user(self) -> dict[str, tuple[DbOrder, ...]]:
-        """user_id → 주문들(id 순 = 사용자별 처리 순서, 명세 1)."""
+        """user_id → 주문들(id 순 = 사용자별 처리 순서, 계약 명세 1)."""
         out: dict[str, list[DbOrder]] = {}
         for o in self.orders:
             out.setdefault(o.user_id, []).append(o)
@@ -824,7 +824,7 @@ class DbSnapshot:
         )
 
 
-# ---------------------------------------------------------------- 불변식 결과(명세 7)
+# ---------------------------------------------------------------- 불변식 결과(계약 명세 7)
 
 
 @dataclass(frozen=True)
@@ -844,7 +844,7 @@ class InvariantViolation:
 
 @dataclass(frozen=True)
 class InvariantResult:
-    """불변식 하나의 평가(명세 7). invariants가 만들고 CheckResult로 바꾼다.
+    """불변식 하나의 평가(계약 명세 7). invariants가 만들고 CheckResult로 바꾼다.
 
     id: 불변식 id(INVARIANT_IDS). source: "sql" | "python".
     violations: 위반 수. 평가하지 못하면 None(DB_ERROR, SCHEMA_DRIFT, ticks 없음 등).
@@ -859,7 +859,7 @@ class InvariantResult:
     detail: Mapping[str, Any] = _mdefault()
 
 
-# ---------------------------------------------------------------- 분류 결과(명세 4)
+# ---------------------------------------------------------------- 분류 결과(계약 명세 4)
 
 
 @dataclass(frozen=True)
@@ -902,7 +902,7 @@ class Fault:
 
 @dataclass(frozen=True)
 class SpeedPoint:
-    """run.json replay_speed[] 원소 = {from_ms, speed}. 판정에 쓰지 않는다(명세 7, I7 삭제)."""
+    """run.json replay_speed[] 원소 = {from_ms, speed}. 판정에 쓰지 않는다(계약 명세 7, I7 삭제)."""
 
     from_ms: int
     speed: Decimal
@@ -910,7 +910,7 @@ class SpeedPoint:
 
 @dataclass(frozen=True)
 class DbTarget:
-    """psql exec 대상(run.json db, 명세 6). 비밀번호는 받지 않는다(로컬 소켓 trust 전제).
+    """psql exec 대상(run.json db, 계약 명세 6). 비밀번호는 받지 않는다(로컬 소켓 trust 전제).
 
     기본값은 로컬 개발 기본값이다. 클러스터 값은 확인 필요(앱·인프라).
     container가 None이면 `-c`를 붙이지 않는다.
@@ -928,7 +928,7 @@ class RunContext:
 
     criteria·scenario의 상대 경로는 run.json 위치 기준으로 푼다.
     marks: 이름 → epoch ms(값이 있는 것만). inject_start, inject_end 외 이름도 받는다.
-    extra_accounts: 발표자 user_id(명세 8). db: psql 대상.
+    extra_accounts: 발표자 user_id(계약 명세 8). db: psql 대상.
     filled_from_marks_local: marks.local.json에서 채운 항목(예: "marks.inject_end").
     """
 
@@ -972,6 +972,9 @@ class Criteria:
 
     data: 병합 결과(dict). checks·guards·fault_effect는 늘 list다. 바꾸지 않는다.
     text: criteria.resolved.yaml 내용(정렬된 키). sha256 = sha256(text UTF-8).
+    file_sha256: 판정이 근거로 삼은 기준 파일(run.json criteria 또는 --criteria) 원본 바이트의
+      sha256. verdict inputs.criteria_sha256이 되고, runner(orchestrator.judging.accept)가
+      그 파일과 대조한다. resolved를 읽은 경우에도 run.json이 가리키는 원본 파일 값이다.
     chain: extends 사슬 파일 이름(뿌리 → 잎). 해시에 들어가지 않는다.
     disabled: disable로 끈 id(정렬). 정보용이다. resolved에 남지 않아 판정에 쓰지 않는다(설계 6).
     """
@@ -980,6 +983,7 @@ class Criteria:
     text: str = ""
     sha256: str = ""
     source: Path | None = None
+    file_sha256: str = ""
     chain: tuple[str, ...] = ()
     disabled: tuple[str, ...] = ()
 
@@ -1006,7 +1010,7 @@ class Criteria:
 
 @dataclass(frozen=True)
 class IntegrityCfg:
-    """분류기·불변식 설정(기준 YAML integrity, 명세 5, 7).
+    """분류기·불변식 설정(기준 YAML integrity, 계약 명세 5, 7).
 
     response_fields: 응답 JSON 필드 → orders 열(DEFAULT_RESPONSE_FIELDS). 원 응답 대 DB 비교에 쓴다.
     response_fields_confirmed: false면 응답 대 DB 불일치는 RESPONSE_SCHEMA_UNCONFIRMED.
@@ -1028,10 +1032,10 @@ def _compiled(pattern: str) -> re.Pattern[str]:
 
 @dataclass(frozen=True)
 class SafetyCfg:
-    """안전장치 설정(기준 YAML safety, 명세 8). criteria.safety_cfg가 만든다.
+    """안전장치 설정(기준 YAML safety, 계약 명세 8). criteria.safety_cfg가 만든다.
 
     markets: 주문해도 되는 종목. user_pattern: user_id 정규식(전체 일치로 본다).
-    user_max: user_id 끝 숫자 묶음의 범위 1..user_max(명세 11, seed user-0001..user-1000).
+    user_max: user_id 끝 숫자 묶음의 범위 1..user_max(계약 명세 11, seed user-0001..user-1000).
       끝이 숫자가 아니면 범위를 확인할 수 없어 위반으로 본다.
     """
 
@@ -1075,8 +1079,8 @@ class Verdict:
     """verdict.json v1(설계 5.8). to_dict()가 그대로 JSON이 된다.
 
     integrity = {intents, log_complete, classes, subs, invariants, examples}.
-    inputs = {criteria_sha256, run_json_sha256, evidence_manifest_sha256, judge_version,
-              response_fields_confirmed}.
+    inputs = {criteria_sha256(기준 파일 원본), criteria_resolved_sha256(병합 결과),
+              run_json_sha256, evidence_manifest_sha256, judge_version, response_fields_confirmed}.
     verdict_digest: generated_at·run_info·verdict_digest를 뺀 canonical JSON의 sha256.
     generated_at: epoch ms(digest에 들어가지 않는다).
     """

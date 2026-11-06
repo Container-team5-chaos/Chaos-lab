@@ -1,4 +1,4 @@
-"""invariants.py: 잔고 불변식 7개와 기준 항목 묶기(계약 정렬 명세 7). DB 없이 factories로 돈다.
+"""invariants.py: 잔고 불변식 7개와 기준 항목 묶기(계약 명세 7). DB 없이 factories로 돈다.
 
 기본 make_db는 서비스 공식으로 krw·positions를 계산하므로 모든 불변식이 맞는다.
 위반은 값을 하나씩 바꿔 심고, 그 불변식만 잡히는지 본다.

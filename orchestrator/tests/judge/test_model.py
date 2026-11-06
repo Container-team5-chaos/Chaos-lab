@@ -1,4 +1,4 @@
-"""공용 모델·직렬화·테스트 빌더(설계 5.1, 5.8, 계약 정렬 명세 1–8)."""
+"""공용 모델·직렬화·테스트 빌더(설계 5.1, 5.8, 계약 명세 1–8)."""
 
 import dataclasses
 import json
@@ -94,7 +94,7 @@ def test_exit_codes():
     assert EXIT_BY_VERDICT[Outcome.INCONCLUSIVE] == 11
 
 
-# ---------------------------------------------------------------- Enum·클래스 묶음(명세 3, 4)
+# ---------------------------------------------------------------- Enum·클래스 묶음(계약 명세 3, 4)
 
 
 def test_kstate_values():
@@ -207,7 +207,7 @@ def test_ts_us_reads_psql_and_service_forms():
 @pytest.mark.parametrize(
     "text, digits",
     [
-        ("2025-11-04T23:46:40.005Z", 3),  # 통일본(명세 11)
+        ("2025-11-04T23:46:40.005Z", 3),  # 통일본(계약 명세 11)
         ("2025-11-04T23:46:40.005123+00:00", 6),  # 서비스 isoformat
         ("2025-11-04T23:46:40+00:00", 0),  # isoformat은 µs가 0이면 소수부를 뺀다
         ("2025-11-04 23:46:40.5+00", 1),  # psql
@@ -224,7 +224,7 @@ def test_ts_digits(text, digits):
 
 
 def test_ts_us_reads_unified_ms_z_form():
-    """명세 11 통일본 형식(밀리초, Z)도 읽는다."""
+    """계약 명세 11 통일본 형식(밀리초, Z)도 읽는다."""
     assert ts_us("2025-11-04T23:46:40.005Z") == 1_762_300_000_005_000
 
 
@@ -258,7 +258,7 @@ def test_run_key_exact_match():
         assert not is_run_key(bad, "r1117-crash")
 
 
-# ---------------------------------------------------------------- 시도 성격(명세 3)
+# ---------------------------------------------------------------- 시도 성격(계약 명세 3)
 
 _ACK_RAW = response_raw("k1")
 
@@ -338,7 +338,7 @@ def test_intent_consistency():
     assert not make_intent(k, body={**it.body, "user_id": ACCT_B}).consistent
 
 
-# ---------------------------------------------------------------- 계좌(명세 2, 8)
+# ---------------------------------------------------------------- 계좌(계약 명세 2, 8)
 
 
 def test_derive_accounts_by_vu():
@@ -399,7 +399,7 @@ def test_safety_cfg():
 @pytest.mark.parametrize(
     "user_id, ok",
     [
-        ("user-0000", False),  # 명세 11: 범위 1..user_max(seed user-0001..1000)
+        ("user-0000", False),  # 계약 명세 11: 범위 1..user_max(seed user-0001..1000)
         ("user-0001", True),
         ("user-1000", True),
         ("user-1001", False),
@@ -531,7 +531,7 @@ def test_factories_default_ok_case_is_consistent():
 
     assert isinstance(it, Intent) and it.key == k == it.body["client_order_id"]
     assert rs.atts[0].is_ack and rs.atts[0].rp is False
-    # 원 응답 = DB 행(명세 5 매핑, order_value 비교)
+    # 원 응답 = DB 행(계약 명세 5 매핑, order_value 비교)
     resp = rs.first_ack.json()
     for field, col in DEFAULT_RESPONSE_FIELDS.items():
         assert order_value(col, resp[field]) == o.value(col), field

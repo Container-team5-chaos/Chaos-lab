@@ -174,7 +174,7 @@ def test_fault_extra_keys_kept(tmp_path):
 
 
 def test_extra_accounts_are_user_ids(tmp_path):
-    """발표자 계좌는 user_id다(명세 8). 순서를 지키고 중복은 뺀다."""
+    """발표자 계좌는 user_id다(계약 명세 8). 순서를 지키고 중복은 뺀다."""
     accts = ["user-0999", "user-0001", "user-0999"]
     ctx = load_run(write(tmp_path, base_run(extra_accounts=accts)))
     assert ctx.extra_accounts == ("user-0999", "user-0001")
@@ -188,7 +188,7 @@ def test_check_user_id():
 
 
 def test_db_target(tmp_path):
-    """psql 대상(명세 6). 빠진 키·null은 기본값이다."""
+    """psql 대상(계약 명세 6). 빠진 키·null은 기본값이다."""
     db = {"pod": "postgres-1", "container": "postgres", "user": "app_ro"}
     ctx = load_run(write(tmp_path, base_run(db=db)))
     assert ctx.db == DbTarget(
@@ -274,3 +274,24 @@ def test_marks_local_values_validated(tmp_path):
     write(tmp_path, {"marks": {"inject_end": "later"}}, "marks.local.json")
     with pytest.raises(InputError):
         load_run(p)
+
+
+def test_reads_run_json_written_by_runner(tmp_path):
+    """A의 runner(orchestrator.runjson.RunFile, PR #5)가 쓴 run.json을 그대로 읽는다(설계 1.4)."""
+    from orchestrator.runjson import RunFile
+
+    rf = RunFile(tmp_path / "runs", "r-abc123")
+    rf.create("r-abc123", {"name": "pod-kill"}, scenario_path="scenario.yaml")
+    rf.mark("inject_start", 1762300000000)
+    rf.add_fault("pod-kill", "order", 1762300000100)
+    ctx = load_run(rf.path)
+    assert (ctx.run_id, ctx.experiment) == ("r-abc123", "pod-kill")
+    assert ctx.marks["inject_start"] == 1762300000000
+    assert (
+        ctx.criteria.name == "default.yaml"
+    )  # runner 기본값 ../../experiments/criteria/default.yaml
+    assert (ctx.db.pod, ctx.db.user, ctx.db.database) == (
+        "postgres-0",
+        "exchange",
+        "exchange",
+    )

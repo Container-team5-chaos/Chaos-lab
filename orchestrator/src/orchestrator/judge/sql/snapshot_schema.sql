@@ -1,4 +1,4 @@
--- snapshot_schema (계약 정렬 명세 6, 7 constraints). 서비스 테이블의 열·제약 메타데이터.
+-- snapshot_schema (계약 명세 6, 7 constraints). 서비스 테이블의 열·제약 메타데이터.
 -- kind
 --   table       테이블이 있다(name = 테이블 이름)
 --   column      열(detail = format_type + 'not null' 여부, 예: numeric(24,4) not null)

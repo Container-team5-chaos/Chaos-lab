@@ -1,4 +1,4 @@
-"""클러스터 명령 전송(설계 5.1, 5.4, 7.1, 7.2, 계약 정렬 명세 6).
+"""클러스터 명령 전송(설계 5.1, 5.4, 7.1, 7.2, 계약 명세 6).
 
 - judge는 노트북에서 kubectl을 부른다. 모든 클러스터 명령은 CMD_PREFIX로 시작한다.
 - psql 대상(Pod, 컨테이너, DB 사용자, DB 이름)은 run.json db(model.DbTarget)에서 받는다.
@@ -32,16 +32,17 @@ __all__ = [
     "subprocess_runner",
 ]
 
-NAMESPACE = "papertrade"  # 옛 설계 명세 값. 주문 서비스 namespace는 확인 필요(인프라, 명세 6 <ns>)
+# 거래소 서비스·DB 공용 namespace(infra/k8s/data/00-namespace.yaml, PR #5 "E 환경 기준")
+NAMESPACE = "exchange"
 CMD_PREFIX = ("kubectl", "-n", NAMESPACE)  # 설계 5.1
 
-# 명세 6: postgres Pod 안 Unix 소켓, 표준 입력으로 bundle.sql을 넘긴다.
+# 계약 명세 6: postgres Pod 안 Unix 소켓, 표준 입력으로 bundle.sql을 넘긴다.
 # -X: ~/.psqlrc를 읽지 않는다. ON_ERROR_STOP=1: 첫 오류에서 멈춘다(남은 구획은 DB_ERROR).
 _PSQL_HEAD = ("psql", "-X", "-q", "-v", "ON_ERROR_STOP=1")
 
 
 def psql_args(target: DbTarget | None = None) -> tuple[str, ...]:
-    """`psql -X -q -v ON_ERROR_STOP=1 -U <user> -d <database> -f -`(명세 6)."""
+    """`psql -X -q -v ON_ERROR_STOP=1 -U <user> -d <database> -f -`(계약 명세 6)."""
     t = target if target is not None else DbTarget()
     return (*_PSQL_HEAD, "-U", t.user, "-d", t.database, "-f", "-")
 
@@ -99,7 +100,7 @@ class Transports:
 
     prefix: kubectl 명령 접두어. 기본은 CMD_PREFIX.
     psql_prefix: psql 앞에 붙일 접두어. None이면
-        `prefix + exec -i <pod> [-c <container>] --`를 쓴다(명세 6, DbTarget).
+        `prefix + exec -i <pod> [-c <container>] --`를 쓴다(계약 명세 6, DbTarget).
     runner: argv 실행 함수. 테스트는 가짜 함수를 넣는다.
     timeout_s: run()에 timeout을 주지 않을 때 쓰는 값.
     2차: Prometheus direct HTTP 경로를 여기에 더한다(설계 5.9, 7.3). 주소는 코드에 두지 않는다.
@@ -145,7 +146,7 @@ class Transports:
     def exec_argv(
         self, pod: str, container: str | None, *cmd: str, stdin: bool = False
     ) -> tuple[str, ...]:
-        """`kubectl -n papertrade exec [-i] <pod> [-c <container>] -- <cmd>`(설계 4.8, 명세 6).
+        """`kubectl -n exchange exec [-i] <pod> [-c <container>] -- <cmd>`(설계 4.8, 계약 명세 6).
 
         container가 None이거나 빈 문자열이면 `-c`를 붙이지 않는다(Pod 기본 컨테이너).
         """
@@ -154,7 +155,7 @@ class Transports:
         return self.kubectl_argv(*head, pod, *pick, "--", *cmd)
 
     def psql_argv(self, target: DbTarget | None = None) -> tuple[str, ...]:
-        """bundle.sql을 표준 입력으로 받는 psql argv(명세 6). target 기본값은 DbTarget()."""
+        """bundle.sql을 표준 입력으로 받는 psql argv(계약 명세 6). target 기본값은 DbTarget()."""
         t = target if target is not None else DbTarget()
         args = psql_args(t)
         if self.psql_prefix is not None:

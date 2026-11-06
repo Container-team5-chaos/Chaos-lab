@@ -1,4 +1,4 @@
-"""k6 기록 파서(JSONL v2)와 기록 완전성(설계 4.6, 5.3, 8, 계약 정렬 명세 2)."""
+"""k6 기록 파서(JSONL v2)와 기록 완전성(설계 4.6, 5.3, 8, 계약 명세 2)."""
 
 import dataclasses
 import gzip
@@ -127,7 +127,7 @@ def test_accounts_come_from_intents():
 
 
 def test_vu_user_mapping_is_left_to_pipeline():
-    """한 VU가 두 user를 써도 파서는 문제로 적지 않는다(safety 가드 몫, 명세 8)."""
+    """한 VU가 두 user를 써도 파서는 문제로 적지 않는다(safety 가드 몫, 계약 명세 8)."""
     objs = ok_objs()
     objs[I3]["acct"] = objs[I3]["body"]["user_id"] = ACCT_B  # VU 1이 B도 쓴다
     log = parse_k6log(dump(objs))
@@ -547,7 +547,7 @@ def _pop_body(field):
     ],
 )
 def test_intent_format_is_flagged_not_dropped(mutate, needle):
-    """형식 위반은 표시만 한다. 기록은 남고 완전성과 무관하다(분류는 classify, 명세 2)."""
+    """형식 위반은 표시만 한다. 기록은 남고 완전성과 무관하다(분류는 classify, 계약 명세 2)."""
     objs = ok_objs()
     mutate(objs)
     log = parse_k6log(dump(objs))

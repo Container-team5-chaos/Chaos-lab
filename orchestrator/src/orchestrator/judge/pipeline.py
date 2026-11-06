@@ -8,18 +8,18 @@
 - judge(run_json, offline): run.json 하나로 collect(오프라인이면 건너뜀) → evaluate.
 
 증거 폴더(runs/<run_id>/, 설계 4.8, 5.2)
-    k6/orders.jsonl.gz | k6/orders.jsonl  주문 기록(JSONL v2, 명세 2). 둘 다 있으면 .gz를 읽는다
+    k6/orders.jsonl.gz | k6/orders.jsonl  주문 기록(JSONL v2, 계약 명세 2). 둘 다 있으면 .gz를 읽는다
     k6/summary.json                       handleSummary. 없거나 깨지면(잘림) 기록 불완전(OOM 등)
     k6/pod-status.json                    k6 컨테이너 종료 코드
     k6/sha256sum.txt                      원격 sha256sum 출력. 없으면 sha256 미검증
     k6/derived.json                       노드 − 노트북 시계 차이. 없으면 표지 기준 구간은 NOT_EVALUATED
-    raw/db/snapshot.txt                   psql 출력(--@ 구획 + COPY CSV, 명세 6)
+    raw/db/snapshot.txt                   psql 출력(--@ 구획 + COPY CSV, 계약 명세 6)
 
 판정 순서
 1. 증거를 읽는다. judge가 만드는 파일(pod-status, derived, sha256sum, snapshot)의 형식이 틀리면
    InputError(12)다. k6가 Pod 안에서 쓰는 파일(orders, summary)의 형식 오류는 기록 불완전으로
    다룬다(설계 5.7 하단). 기록의 run 값이 run_id와 달라도 InputError다.
-2. 계좌 집합(명세 8): intent의 user_id(seed 계좌, k6가 만들지 않는다)와 extra 계좌
+2. 계좌 집합(계약 명세 8): intent의 user_id(seed 계좌, k6가 만들지 않는다)와 extra 계좌
    (run.json extra_accounts, 발표자 user_id. DB 전용 검사만).
 3. 분류(classify), 불변식(check_invariants → item_results), 기록 완전성(log_complete).
 4. 기준(checks)을 기준 파일 순서로 평가한다.
@@ -31,13 +31,13 @@
      DB 행도 없음(LOST). 이미 FAIL이면 FAIL이 남는다(설계 5.3, 5.7 규칙 4).
    - sql·check(fresh): invariants.item_results. k6 exit_code: verdict.k6_exit_to_checks.
    - client·prom: 1차 미구현(설계 5.5, 5.9)이라 INCONCLUSIVE(NOT_EVALUATED). required: false면 보고만 한다.
-5. 가드(설계 5.6, 명세 8). 구현한 것: safety(종목·user_id 형식·run 키·1 VU = 1 user·비밀 키),
+5. 가드(설계 5.6, 계약 명세 8). 구현한 것: safety(종목·user_id 형식·run 키·1 VU = 1 user·비밀 키),
    account_set, fill_coverage, sell_coverage(ask 체결), load_coverage, fault_in_load,
    fault_effect(class_sub는 분류 결과, observe는 run.json·marks.local의 obs 값), db_quiescent.
    그 밖(2차 WS 가드)은 NOT_EVALUATED다.
    표지 기준 구간과 fault_in_load는 시계 차이를 모르면(derived.json 없음) NOT_EVALUATED다.
    log_complete는 required=false로 덧붙인다.
-   judge_self_check(스냅샷 run 키 주문 수 대 분류기 D1 수, 명세 7)는 required=false 기준으로 덧붙인다.
+   judge_self_check(스냅샷 run 키 주문 수 대 분류기 D1 수, 계약 명세 7)는 required=false 기준으로 덧붙인다.
 6. combine → build_verdict(설계 5.7, 5.8). orders 행이 ORDERS_WARN_ROWS를 넘으면 경고 SNAPSHOT_LARGE.
 """
 
@@ -74,7 +74,11 @@ from .client import (
     run_window,
 )
 from .context import load_run
-from .criteria import RESOLVED_NAME, integrity_cfg, load_criteria, safety_cfg
+from .criteria import (
+    integrity_cfg,
+    safety_cfg,
+    select_criteria,
+)
 from .db import parse_bundle_output
 from .errors import InputError
 from .fetch import (
@@ -187,8 +191,8 @@ _UNCERTAIN_SOURCES = {
 ACCOUNT_SET_UNAVAILABLE = (OrderClass.LOST.value, OrderClass.ORPHAN.value)
 CLOCK_UNKNOWN_NOTE = "시계 차이 미측정(k6/derived.json 없음, 설계 4.8 4단계·5.5)"
 
-# 열은 그대로 둔다(명세 4). resend는 옛 ResendOutcome 대신 재전송 수(시도 수 − 1)다.
-# 재전송이 atts에 합쳐졌기 때문이다(명세 2). result가 없는 행(INTERRUPTED, DB 전용)은 빈 값이다
+# 열은 그대로 둔다(계약 명세 4). resend는 옛 ResendOutcome 대신 재전송 수(시도 수 − 1)다.
+# 재전송이 atts에 합쳐졌기 때문이다(계약 명세 2). result가 없는 행(INTERRUPTED, DB 전용)은 빈 값이다
 CLASSIFIED_COLUMNS = (
     "key",
     "account_id",
@@ -215,7 +219,7 @@ class Evidence:
     remote_sha: sha256sum.txt의 orders.jsonl 줄 값(16진 소문자).
     summary_error: summary.json이 있는데 JSON 객체로 읽지 못한 사유(잘림 등). 이때 summary는 None.
     summary_token_key: 읽지 못한 summary 원문에서 "...token"·"...authorization" 키를 찾았다
-      (명세 8 safety).
+      (계약 명세 8 safety).
     clock_offset_ms: None이면 시계 차이를 모른다(derived.json 없음).
     """
 
@@ -371,7 +375,7 @@ def load_evidence(evidence: str | Path) -> Evidence:
     )
 
 
-# ---------------------------------------------------------------- 계좌 집합(명세 8)
+# ---------------------------------------------------------------- 계좌 집합(계약 명세 8)
 
 
 @dataclass(frozen=True)
@@ -394,7 +398,7 @@ class AccountScope:
 
     @property
     def mismatch(self) -> bool:
-        """ACCOUNT_SET_MISMATCH(명세 8): JSONL의 user_id 중 DB accounts에 없는 것이 있다.
+        """ACCOUNT_SET_MISMATCH(계약 명세 8): JSONL의 user_id 중 DB accounts에 없는 것이 있다.
 
         다른 DB를 봤거나 seed가 다르다는 뜻이라 LOST·ORPHAN 판정을 보류한다(설계 5.7 규칙 1).
         """
@@ -404,7 +408,7 @@ class AccountScope:
 def account_scope(
     ctx: RunContext, log: K6Log | None, db: DbSnapshot | None
 ) -> AccountScope:
-    """계좌 집합을 만든다(명세 8). DB accounts 구획이 없으면 evaluable이 False다."""
+    """계좌 집합을 만든다(계약 명세 8). DB accounts 구획이 없으면 evaluable이 False다."""
     extra = frozenset(ctx.extra_accounts)
     jsonl = log.account_ids if log is not None else frozenset()
     if log is None or db is None or "accounts" not in db.sections:
@@ -672,7 +676,7 @@ def _checks(st: _State, inv_items: Mapping[str, CheckResult]) -> list[CheckResul
 
 
 def _self_check(st: _State) -> CheckResult | None:
-    """스냅샷 run 키 주문 수 대 분류기 D1 수(명세 7 judge_self_check). 보고만 한다.
+    """스냅샷 run 키 주문 수 대 분류기 D1 수(계약 명세 7 judge_self_check). 보고만 한다.
 
     스냅샷 쪽은 invariants.run_key_counts(run 키 전체 형식 주문 행 수·키 수), 분류기 쪽은
     run 키 행에 매칭된 orders.id 수(classify.run_order_count)와 그 행 수다(D1 + ORPHAN).
@@ -716,16 +720,16 @@ SAFETY_COUNTS = (
 
 
 def _g_safety(st: _State, spec: Mapping[str, Any]) -> CheckResult:
-    """안전장치(명세 8). 모든 intent를 본다. 하나라도 어기면 FAIL(SAFETY_VIOLATION).
+    """안전장치(계약 명세 8). 모든 intent를 본다. 하나라도 어기면 FAIL(SAFETY_VIOLATION).
 
     - bad_market: body.market이 safety.markets에 없다.
     - bad_user: acct 또는 body.user_id가 safety.user_pattern에 전체 일치하지 않거나, 끝 번호가
-      1..safety.user_max 밖이다(명세 11).
-    - bad_key: key 또는 body.client_order_id가 이 run의 키가 아니거나 64자를 넘는다(명세 11,
+      1..safety.user_max 밖이다(계약 명세 11).
+    - bad_key: key 또는 body.client_order_id가 이 run의 키가 아니거나 64자를 넘는다(계약 명세 11,
       서비스 schemas.py 상한). 명세 문구는 접두어 `k6-<run_id>-`지만 전체 형식
       `k6-<run_id>-<vu>-<seq>`(model.is_run_key)로 본다. 접두어만 보면 r1117-crash의 판정이
       r1117-crash-2의 키를 받아들인다. intent 없는 result의 키도 본다.
-    - inconsistent: key ≠ body.client_order_id 또는 acct ≠ body.user_id(명세 2).
+    - inconsistent: key ≠ body.client_order_id 또는 acct ≠ body.user_id(계약 명세 2).
     - vu_multi_account·account_multi_vu: 1 VU = 1 user 위반(한 VU가 두 user, 한 user를 두 VU).
     - token_key: 기록(JSONL, summary)에 token·authorization으로 끝나는 키가 있다.
     """
@@ -780,12 +784,12 @@ def _g_safety(st: _State, spec: Mapping[str, Any]) -> CheckResult:
 
 
 def _safe_key(key: Any, run_id: str) -> bool:
-    """이 run의 전체 키 형식이고 서비스 상한(64자) 안이다(명세 8, 11)."""
+    """이 run의 전체 키 형식이고 서비스 상한(64자) 안이다(계약 명세 8, 11)."""
     return is_run_key(key, run_id) and len(key) <= CLIENT_ORDER_ID_MAX
 
 
 def _g_account_set(st: _State, spec: Mapping[str, Any]) -> CheckResult:
-    """계좌 집합(명세 8). JSONL의 user_id가 모두 DB accounts에 있어야 한다(seed 계좌).
+    """계좌 집합(계약 명세 8). JSONL의 user_id가 모두 DB accounts에 있어야 한다(seed 계좌).
 
     없으면 ACCOUNT_SET_MISMATCH(LOST·ORPHAN 판정 보류). extra 계좌가 DB에 없거나
     require_extra_accounts인데 비었으면 EXTRA_ACCOUNTS_MISSING.
@@ -1357,10 +1361,12 @@ def assess(
     if isinstance(summary, Mapping):
         warnings.update(summary.get("warnings", ()))
     if db is not None and len(db.orders) > ORDERS_WARN_ROWS:
-        warnings.add(R.SNAPSHOT_LARGE)  # 명세 6: 판정은 그대로, 경고만
+        warnings.add(R.SNAPSHOT_LARGE)  # 계약 명세 6: 판정은 그대로, 경고만
 
     inputs = {
-        "criteria_sha256": crit.sha256,
+        # runner(orchestrator.judging.accept)가 run.json criteria 파일 바이트와 대조한다
+        "criteria_sha256": crit.file_sha256 or crit.sha256,
+        "criteria_resolved_sha256": crit.sha256,
         "run_json_sha256": ctx.run_json_sha256,
         "marks_local_sha256": ctx.marks_local_sha256,
         "evidence_manifest_sha256": ev.manifest_sha256,
@@ -1449,7 +1455,7 @@ def collect(ctx: RunContext, crit: Criteria, tr: Transports) -> Path:
     1. fetch(4.8): k6 Pod를 찾고 terminated를 기다린다. k6/pod-status.json, k6/sha256sum.txt,
        k6/orders.jsonl.gz, k6/summary.json, k6/derived.json을 쓴다.
     2. 정지 확인: k6 종료 뒤 10s 기다린다.
-    3. DB(명세 6): db.build_bundle(ctx, stale_ms=integrity_cfg(crit).stale_ms) →
+    3. DB(계약 명세 6): db.build_bundle(ctx, stale_ms=integrity_cfg(crit).stale_ms) →
        db.exec_bundle(tr, bundle, target=ctx.db)(psql 1회, 비밀번호 없음). 출력은 raw/db/snapshot.txt.
        F1 ≠ F2면 30s 뒤 한 번 더. psql 실패(TransportError)는 잡아 빠진 구획(DB_ERROR)으로 남긴다.
     4. Pod 관측: kubectl get pods -o json을 raw/k8s/에 남기고 pod_replaced·crash_restart를 만든다.
@@ -1460,11 +1466,7 @@ def collect(ctx: RunContext, crit: Criteria, tr: Transports) -> Path:
 
 
 def _criteria_for(ctx: RunContext, *, prefer_resolved: bool) -> Criteria:
-    if prefer_resolved and ctx.run_dir is not None:
-        resolved = ctx.run_dir / RESOLVED_NAME
-        if resolved.is_file():
-            return load_criteria(resolved)
-    return load_criteria(ctx.criteria)
+    return select_criteria(ctx.criteria, ctx.run_dir, prefer_resolved=prefer_resolved)
 
 
 def judge(

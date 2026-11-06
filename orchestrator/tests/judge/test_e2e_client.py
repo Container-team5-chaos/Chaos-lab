@@ -46,7 +46,7 @@ def test_env_with_keeps_shell_for_docker_cli(monkeypatch):
 @pytest.mark.parametrize(
     "run_id, vu, seq, want",
     [
-        ("demo-1106", 1, 42, "k6-demo-1106-0001-000042"),  # 명세 11 예
+        ("demo-1106", 1, 42, "k6-demo-1106-0001-000042"),  # 계약 명세 11 예
         ("r-e2e-order", 5, 1, "k6-r-e2e-order-0005-000001"),
     ],
 )
@@ -56,7 +56,7 @@ def test_run_key_matches_k6_format(run_id, vu, seq, want):
 
 
 def test_run_key_fits_service_limit_for_longest_run_id():
-    """run_id는 최대 40자(run.json 규칙)다. 그래도 64자 이하다(명세 11)."""
+    """run_id는 최대 40자(run.json 규칙)다. 그래도 64자 이하다(계약 명세 11)."""
     run_id = "r" * 40
     assert len(run_key(run_id, 9999, 999999)) <= CLIENT_ORDER_ID_MAX
 

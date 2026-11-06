@@ -1,4 +1,4 @@
-"""k6 주문 기록(orders.jsonl, JSONL v2) 엄격 파서와 기록 완전성(설계 4.6, 4.8, 5.3, 계약 정렬 명세 2).
+"""k6 주문 기록(orders.jsonl, JSONL v2) 엄격 파서와 기록 완전성(설계 4.6, 4.8, 5.3, 계약 명세 2).
 
 - 줄마다 JSON을 읽고 type별 필수 필드를 검사한다. 문제는 예외로 멈추지 않고
   K6Log.problems에 줄 번호와 함께 남긴다. 파일을 못 읽을 때만 InputError다.
@@ -70,7 +70,7 @@ __all__ = [
 
 # ---------------------------------------------------------------- 상수
 
-TYPE_FIELD = "type"  # 줄 종류 필드(명세 2). v1은 kind였다
+TYPE_FIELD = "type"  # 줄 종류 필드(계약 명세 2). v1은 kind였다
 V1_TYPE_FIELD = "kind"
 TYPE_RUN_START = "run_start"
 TYPE_INTENT = "intent"
@@ -98,7 +98,7 @@ INTENT_FIELDS = ("key", "acct", "vu", "t", "body")
 RESULT_FIELDS = ("key", "atts")
 V1_RESULT_FIELDS = ("lookup", "ack", "resend")  # 재전송이 atts에 합쳐져 없앴다
 ATTEMPT_FIELDS = ("n", "t0", "t1", "st", "ec", "ms", "rp", "raw")
-RAW_MAX = 2048  # attempt.raw 상한(명세 2)
+RAW_MAX = 2048  # attempt.raw 상한(계약 명세 2)
 
 COUNTER_INTENTS = "order_intents"  # 4.7 완전성 대조 Counter
 COUNTER_RESULTS = "order_results"
@@ -179,7 +179,7 @@ PROBLEM_CONDITION: Mapping[str, str | None] = {
 _CODE_RE = re.compile(r"^([a-z][a-z0-9_]*)(?: L\d+)?:")
 _OMITTED_RE = re.compile(r"^([a-z][a-z0-9_]*): 그 밖 (\d+)건 생략$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
-# 비밀 키 이름 끝(대소문자 무시). 명세 8 safety: token·authorization 키가 없어야 한다
+# 비밀 키 이름 끝(대소문자 무시). 계약 명세 8 safety: token·authorization 키가 없어야 한다
 SECRET_KEY_SUFFIXES = ("token", "authorization")
 # 문자열 안 JSON 텍스트의 "...token": / "...authorization": 키(잘린 응답 원문도 잡는다)
 _SECRET_TEXT_RE = re.compile(r'"[^"\\]*(?:token|authorization)"\s*:', re.IGNORECASE)
@@ -194,7 +194,7 @@ def parse_k6log(
     summary: Mapping[str, Any] | None = None,
     expected_sha256: str | None = None,
 ) -> K6Log:
-    """orders.jsonl(.gz, JSONL v2)을 엄격하게 읽어 K6Log를 만든다(설계 4.6, 5.3, 명세 2).
+    """orders.jsonl(.gz, JSONL v2)을 엄격하게 읽어 K6Log를 만든다(설계 4.6, 5.3, 계약 명세 2).
 
     path_or_lines: 파일 경로(str·PathLike), 파일 바이트, 또는 줄 목록(str·bytes).
       gzip 매직(1f 8b)이면 압축을 푼다. 줄 목록이면 sha256은 줄마다 "\\n"을 붙인 바이트 기준이다.
@@ -215,7 +215,7 @@ def parse_k6log(
 
 
 def intent_issues(it: Intent, run_id: str | None = None) -> tuple[str, ...]:
-    """intent 형식 위반 설명(명세 2). 비면 위반 없음. 값은 넣지 않는다.
+    """intent 형식 위반 설명(계약 명세 2). 비면 위반 없음. 값은 넣지 않는다.
 
     - body: JSON 객체여야 하고 client_order_id, user_id, market, side, volume이
       비어 있지 않은 문자열이어야 한다(volume은 10진 문자열).
@@ -367,7 +367,7 @@ def sha_matches(log: K6Log, expected: str | None) -> bool:
 
 
 def find_token_keys(obj: Any, prefix: str = "$") -> tuple[str, ...]:
-    """'token'·'authorization'으로 끝나는 키(대소문자 무시)의 경로(명세 8 safety, 설계 7.4).
+    """'token'·'authorization'으로 끝나는 키(대소문자 무시)의 경로(계약 명세 8 safety, 설계 7.4).
 
     중첩 객체·배열을 모두 보고, 문자열 안 JSON 텍스트의 "...token":·"...authorization":
     키도 찾는다(응답 원문 raw, 본문 문자열 body, 깨진 summary 원문). 값은 돌려주지 않는다.
@@ -869,7 +869,7 @@ def _ec(v: Any, name: str) -> str | None:
 
 
 def _attempt(v: Any, name: str, soft: Soft) -> Attempt:
-    """atts[] 원소 {n, t0, t1, st, ec, ms, rp, raw}(명세 2). 8개 키가 모두 있어야 한다.
+    """atts[] 원소 {n, t0, t1, st, ec, ms, rp, raw}(계약 명세 2). 8개 키가 모두 있어야 한다.
 
     rp·raw 일관성(200이 아닌데 rp가 있음, rp ≠ raw.replayed, raw 길이 초과)은 soft다.
     """
@@ -980,7 +980,7 @@ def _initial_cash(v: Any, soft: Soft) -> int | None:
 
 
 def _conn_reuse(v: Any, soft: Soft) -> bool | None:
-    """있어도 되고 판정에 쓰지 않는다(명세 2). 틀린 값은 None으로 둔다."""
+    """있어도 되고 판정에 쓰지 않는다(계약 명세 2). 틀린 값은 None으로 둔다."""
     if v is None or isinstance(v, bool):
         return v
     soft.append((BAD_FIELD, f"conn_reuse는 true·false·null이어야 한다({_desc(v)})"))

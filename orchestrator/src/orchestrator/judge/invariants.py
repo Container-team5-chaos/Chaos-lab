@@ -1,4 +1,4 @@
-"""잔고 불변식(계약 정렬 명세 7). DB 스냅샷(전체 행)으로 Python이 계산해 InvariantResult를 낸다.
+"""잔고 불변식(계약 명세 7). DB 스냅샷(전체 행)으로 Python이 계산해 InvariantResult를 낸다.
 
 불변식(모두 status='filled' 주문만 센다)
 - cash: 모든 계좌 krw + Σ(bid amount) − Σ(ask amount) = initial_krw. 계좌 없는 주문도 위반이다.
@@ -159,7 +159,7 @@ EXPECTED_CONSTRAINTS: Mapping[str, tuple[str, ...]] = {
 
 @dataclass(frozen=True)
 class Scope:
-    """arith·fresh 대상(명세 7): run 주문(+extra 계좌 주문). run_id가 None이면 모든 주문이다."""
+    """arith·fresh 대상(계약 명세 7): run 주문(+extra 계좌 주문). run_id가 None이면 모든 주문이다."""
 
     run_id: str | None = None
     extra: frozenset[str] = frozenset()
@@ -260,7 +260,7 @@ class _Flow:
 
 
 def check_cash(db: DbSnapshot, initial_krw: Decimal) -> InvariantResult:
-    """모든 계좌: krw + Σ(bid amount) − Σ(ask amount) = initial_krw(명세 7 cash).
+    """모든 계좌: krw + Σ(bid amount) − Σ(ask amount) = initial_krw(계약 명세 7 cash).
 
     problem: mismatch(식이 안 맞음), krw_null, order_null(filled 주문 amount NULL·side 이상),
     no_account(주문은 있는데 계좌 행이 없다).
@@ -320,7 +320,7 @@ def check_cash(db: DbSnapshot, initial_krw: Decimal) -> InvariantResult:
 
 
 def check_qty(db: DbSnapshot) -> InvariantResult:
-    """모든 (user, market) ∈ positions ∪ orders: volume(없으면 0) = Σ bid − Σ ask(명세 7 qty).
+    """모든 (user, market) ∈ positions ∪ orders: volume(없으면 0) = Σ bid − Σ ask(계약 명세 7 qty).
 
     problem: mismatch, volume_null(positions.volume NULL), order_null(filled 주문 volume NULL·side 이상).
     """
@@ -389,7 +389,7 @@ class Replay:
 
 
 def replay_position(orders: Iterable[DbOrder]) -> Replay:
-    """filled 주문을 id 순으로 orders.place_order와 같은 식으로 재생한다(명세 7 avg).
+    """filled 주문을 id 순으로 orders.place_order와 같은 식으로 재생한다(계약 명세 7 avg).
 
     bid: new_volume = held + v, new_avg = ((held·avg + v·price) / new_volume).quantize(1e-8).
     ask: new_volume = held − v, avg 그대로(0이 돼도 유지). 계산은 기본 context(28자리, HALF_EVEN)다.
@@ -429,9 +429,9 @@ def replay_position(orders: Iterable[DbOrder]) -> Replay:
 
 
 def check_avg(db: DbSnapshot) -> InvariantResult:
-    """모든 (user, market): 재생한 avg_price = positions.avg_price, 정확히 같음(명세 7 avg).
+    """모든 (user, market): 재생한 avg_price = positions.avg_price, 정확히 같음(계약 명세 7 avg).
 
-    사용자별로는 accounts FOR UPDATE로 직렬화되어 orders.id 순서 = 처리 순서다(명세 1).
+    사용자별로는 accounts FOR UPDATE로 직렬화되어 orders.id 순서 = 처리 순서다(계약 명세 1).
     problem: mismatch, avg_null, position_missing(주문은 있는데 positions 행이 없다), replay_error.
     """
     miss = _missing("avg", db, ("positions", "orders"))
@@ -479,7 +479,7 @@ def check_avg(db: DbSnapshot) -> InvariantResult:
 
 
 def check_nonneg(db: DbSnapshot) -> InvariantResult:
-    """krw ≥ 0(accounts), volume ≥ 0, avg_price ≥ 0(positions). NULL도 위반이다(명세 7 nonneg)."""
+    """krw ≥ 0(accounts), volume ≥ 0, avg_price ≥ 0(positions). NULL도 위반이다(계약 명세 7 nonneg)."""
     miss = _missing("nonneg", db, ("accounts", "positions"))
     if miss is not None:
         return miss
@@ -508,7 +508,7 @@ def check_nonneg(db: DbSnapshot) -> InvariantResult:
 
 
 def check_arith(db: DbSnapshot, scope: Scope = Scope()) -> InvariantResult:
-    """run 주문(+extra)의 filled 주문: amount = ROUND_DOWN(fill_price × volume, 4)(명세 7 arith).
+    """run 주문(+extra)의 filled 주문: amount = ROUND_DOWN(fill_price × volume, 4)(계약 명세 7 arith).
 
     곱은 서비스처럼 기본 context(28자리)로 계산한다. problem: mismatch, null, error.
     """
@@ -571,7 +571,7 @@ def _norm(s: str | None) -> str:
 
 
 def check_constraints(db: DbSnapshot) -> InvariantResult:
-    """schema 구획이 기대 스키마를 담는지 본다(명세 7 constraints).
+    """schema 구획이 기대 스키마를 담는지 본다(계약 명세 7 constraints).
 
     빠진 테이블·열, 열 형식(타입·NOT NULL) 차이, 빠진 제약(검증 안 된 NOT VALID 제약도 빠진 것으로 본다)이
     하나라도 있으면 violations None + SCHEMA_DRIFT다(판정 불가. FAIL로 세지 않는다).
@@ -633,7 +633,7 @@ def check_fresh(
     db: DbSnapshot, scope: Scope = Scope(), stale_ms: int = DEFAULT_STALE_MS
 ) -> InvariantResult:
     """run 주문(+extra)의 filled 주문마다 같은 market에서 price = fill_price이고
-    received_at ∈ [filled_at − stale_ms − 1s, filled_at + 1s](양끝 포함)인 tick이 있다(명세 7 fresh).
+    received_at ∈ [filled_at − stale_ms − 1s, filled_at + 1s](양끝 포함)인 tick이 있다(계약 명세 7 fresh).
 
     - 체결 열(filled_at, fill_price, market)이 NULL인 주문은 건너뛴다(skipped. FILL_STATE가 센다).
     - 그 market의 tick이 구획에 하나도 없으면 그 주문은 볼 수 없다(unevaluated).
@@ -762,7 +762,7 @@ def check_invariants(
     ctx_like: Any = None,
     crit: Any = None,
 ) -> list[InvariantResult]:
-    """불변식 7개를 INVARIANT_IDS 순서로 평가한다(명세 7).
+    """불변식 7개를 INVARIANT_IDS 순서로 평가한다(계약 명세 7).
 
     ctx_like: run_id·extra_accounts 속성(RunContext 등). arith·fresh 대상을 정한다. None이면 전체.
     crit: Criteria(권장), IntegrityCfg, 맵, 또는 None. initial_krw·stale_ms를 읽는다.
@@ -851,7 +851,7 @@ def item_results(
 def run_key_counts(db: DbSnapshot, run_id: str) -> dict[str, int] | None:
     """run 키(`k6-<run_id>-<vu>-<seq>` 전체 형식) 주문 수. orders 구획이 없으면 None.
 
-    judge_self_check(명세 7) 대조식: keys = 분류기 D1 키 수 + ORPHAN 키 수,
+    judge_self_check(계약 명세 7) 대조식: keys = 분류기 D1 키 수 + ORPHAN 키 수,
     orders − keys = 같은 키 중복 행 수(DUP_ORDER. UNIQUE라 정상이면 0).
     접두어 `k6-<run_id>-`만 보면 r1117-crash가 r1117-crash-2 키까지 센다(그래서 전체 형식).
     """

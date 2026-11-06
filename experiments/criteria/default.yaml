@@ -1,4 +1,4 @@
-# 기본 판정 기준. 모든 실험이 extends로 상속한다(설계 6. 가드는 5.6, 구간은 5.5 기본값, 계약은 정렬 명세 9)
+# 기본 판정 기준. 모든 실험이 extends로 상속한다(설계 6. 가드는 5.6, 구간은 5.5 기본값, 계약은 계약 명세 9)
 # 계약 근거: workloads/order(커밋 6e8f38b) app/config.py, app/schemas.py, db/schema.sql, db/seed.sql
 schema_version: 1
 safety: {markets: [KRW-BTC], user_pattern: '^user-[0-9]{4}$', user_max: 1000}   # SUPPORTED_MARKETS, seed user-0001..1000
@@ -10,7 +10,7 @@ integrity:
   stale_ms: 5000                        # config.py STALE_MS 기본값(클러스터 값 확인 필요: 앱 팀)
   response_fields: {order_id: id, client_order_id: client_order_id, user_id: user_id, market: market,
                     side: side, volume: volume, status: status, fill_price: fill_price, amount: amount,
-                    filled_at: filled_at}  # 응답 필드 → orders 열(명세 5)
+                    filled_at: filled_at}  # 응답 필드 → orders 열(계약 명세 5)
   response_fields_confirmed: true       # schemas.py order_to_dict
 prometheus: {enabled: false}            # 2차. scrape_interval 30s (확인 필요: 관리자)
 guards:                                 # 5.6. 미충족이면 INCONCLUSIVE(on_violation 기본 inconclusive)
@@ -27,7 +27,7 @@ checks:
   - {id: mismatch, kind: integrity, class: [MISMATCH, BODY_MISMATCH], op: '==', value: 0}
   - {id: duplicates, kind: integrity, class: [DUP_ORDER, FILL_STATE, IDEMPOTENCY_VIOLATION], op: '==', value: 0}
   - {id: orphans, kind: integrity, class: [ORPHAN], op: '==', value: 0}
-  # 명세 7. constraints 불일치는 위반 수가 아니라 평가 불가(SCHEMA_DRIFT, INCONCLUSIVE)로 낸다
+  # 계약 명세 7. constraints 불일치는 위반 수가 아니라 평가 불가(SCHEMA_DRIFT, INCONCLUSIVE)로 낸다
   - {id: invariants, kind: integrity, sql: [cash, qty, avg, nonneg, arith, constraints], op: '==', value: 0}
   - {id: stale_fill, kind: integrity, check: fresh, op: '==', value: 0, required: false}   # ticks가 비면 NOT_EVALUATED
   - {id: protocol, kind: unresolved, class: [PROTOCOL], op: '==', value: 0, on_violation: inconclusive}

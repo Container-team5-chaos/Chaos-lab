@@ -4,7 +4,7 @@
 - 창 하한: rate는 `$win ≥ 4 × scrape_interval`, gauge subquery는 점 3개 이상.
   모자라면 `judge plan`이 입력 오류(12)를 낸다.
 - NaN·±Inf·빈 결과·status:error는 INCONCLUSIVE다. 비교 전에 math.isfinite를 검사한다.
-- 서버 지표는 교차 확인(required: false)이다. 모든 쿼리에 namespace="papertrade"를 강제한다.
+- 서버 지표는 교차 확인(required: false)이다. 모든 쿼리에 namespace="exchange"를 강제한다.
 - Prometheus 주소·토큰은 노트북 .env에만 둔다(공개 저장소, 설계 7.4). 코드에 넣지 않는다.
 """
 
@@ -28,7 +28,7 @@ __all__ = [
     "window_ok",
 ]
 
-NAMESPACE_MATCHER = 'namespace="papertrade"'  # 7.3. namespace는 확인 필요(인프라)
+NAMESPACE_MATCHER = 'namespace="exchange"'  # 7.3. infra/k8s/data/00-namespace.yaml
 MIN_RATE_SCRAPES = 4  # rate 창 ≥ 4 × scrape_interval
 MIN_SUBQUERY_POINTS = 3  # gauge subquery 점 수
 QUERY_DELAY_SCRAPES = 2  # 조회는 구간 끝 + 2 × scrape 이후

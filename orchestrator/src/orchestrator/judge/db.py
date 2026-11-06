@@ -1,4 +1,4 @@
-"""DB 스냅샷: bundle.sql 조립, psql 1회 실행, 출력 파싱(계약 정렬 명세 6).
+"""DB 스냅샷: bundle.sql 조립, psql 1회 실행, 출력 파싱(계약 명세 6).
 
 대상은 실제 주문 서비스 스키마(workloads/order/db/schema.sql)다. accounts·positions·orders는
 전체 행을 가져온다(시연 규모라 작다). 불변식은 이 스냅샷으로 invariants가 Python으로 계산한다.
@@ -92,12 +92,12 @@ PSQL_TIMEOUT_S = 180.0
 STATEMENT_TIMEOUT = "120s"
 LOCK_TIMEOUT = "5s"
 
-# schema 구획(명세 6, 7 constraints). 열 이름 table은 SQL 예약어라 table_name으로 낸다.
+# schema 구획(계약 명세 6, 7 constraints). 열 이름 table은 SQL 예약어라 table_name으로 낸다.
 SCHEMA_COLUMNS = ("kind", "table_name", "name", "detail")
 SCHEMA_KINDS = ("table", "column", "constraint")
 # 메타데이터를 가져올 서비스 테이블(workloads/order/db/schema.sql)
 SCHEMA_TABLES = ("accounts", "positions", "orders", "ticks")
-# fresh 창의 시계 여유(명세 7: filled_at − stale_ms − 1000ms ~ filled_at + 1000ms)
+# fresh 창의 시계 여유(계약 명세 7: filled_at − stale_ms − 1000ms ~ filled_at + 1000ms)
 TICK_SLACK_MS = 1000
 # 패키지 sql/<name>.sql(긴 질의만 파일로 둔다)
 SQL_FILES = ("snapshot_schema", "snapshot_ticks")
@@ -115,7 +115,7 @@ BUNDLE_SECTIONS = (
 
 _INT_RE = re.compile(r"-?[0-9]+")
 
-# ---------------------------------------------------------------- 고정 SQL(명세 6)
+# ---------------------------------------------------------------- 고정 SQL(계약 명세 6)
 
 _FINGERPRINT_SQL = """SELECT (SELECT count(*) FROM orders) AS orders,
        (SELECT max(id) FROM orders) AS max_order_id,
@@ -183,7 +183,7 @@ def _check_run_id(run_id: Any) -> str:
 
 
 def run_key_regex(run_id: str) -> str:
-    """run 주문 client_order_id 정규식 `^k6-<run_id>-[0-9]+-[0-9]+$`(명세 2). run_id는 이스케이프한다."""
+    """run 주문 client_order_id 정규식 `^k6-<run_id>-[0-9]+-[0-9]+$`(계약 명세 2). run_id는 이스케이프한다."""
     return f"^k6-{_regex_escape(_check_run_id(run_id))}-[0-9]+-[0-9]+$"
 
 
@@ -260,7 +260,7 @@ def build_bundle(
     extra_ids: Iterable[str] | None = None,
     stale_ms: int | None = None,
 ) -> str:
-    """bundle.sql 텍스트(명세 6). 같은 입력이면 같은 바이트다.
+    """bundle.sql 텍스트(계약 명세 6). 같은 입력이면 같은 바이트다.
 
     ctx_like: run_id·extra_accounts 속성이 있으면 기본값으로 쓴다(RunContext 등). None 가능.
     run_id: None이면 ctx_like.run_id. extra_ids: 발표자 user_id. None이면 ctx_like.extra_accounts.
@@ -275,7 +275,7 @@ def build_bundle(
     ms = _check_stale_ms(DEFAULT_STALE_MS if stale_ms is None else stale_ms)
 
     lines: list[str] = [
-        f"-- bundle.sql (chaos-judge db.build_bundle, 계약 정렬 명세 6) run_id={rid}",
+        f"-- bundle.sql (chaos-judge db.build_bundle, 계약 명세 6) run_id={rid}",
         f"\\set run_key_re {_psql_literal(run_key_regex(rid))}",
         f"\\set extra {_psql_literal(_pg_text_array(extra))}",
         f"\\set schema_tables {_psql_literal(_pg_text_array(SCHEMA_TABLES))}",
@@ -321,10 +321,10 @@ def exec_bundle(
     target: DbTarget | None = None,
     timeout_s: float = PSQL_TIMEOUT_S,
 ) -> PsqlRun:
-    """bundle.sql을 psql 표준 입력으로 한 번 보낸다(명세 6).
+    """bundle.sql을 psql 표준 입력으로 한 번 보낸다(계약 명세 6).
 
     명령은 transports.psql_argv(target)다. 기본은
-    `kubectl -n papertrade exec -i <pod> [-c <container>] -- psql -X -q -v ON_ERROR_STOP=1
+    `kubectl -n exchange exec -i <pod> [-c <container>] -- psql -X -q -v ON_ERROR_STOP=1
     -U <user> -d <database> -f -`. target은 RunContext.db(기본 DbTarget()).
     테스트는 Transports.for_local_pg()로 docker exec를 쓴다.
     0이 아닌 종료 코드는 예외가 아니다(빠진 구획이 DB_ERROR가 된다).
@@ -638,7 +638,7 @@ def _fingerprint(name: str, rows: list[dict], header: Sequence[str]) -> Fingerpr
 
 
 def parse_bundle_output(text: str) -> DbSnapshot:
-    """psql 출력(--@ 구획 + COPY CSV)을 DbSnapshot으로 바꾼다(명세 6).
+    """psql 출력(--@ 구획 + COPY CSV)을 DbSnapshot으로 바꾼다(계약 명세 6).
 
     - numeric은 Decimal(문자열 그대로, 자릿수 유지), bigint는 int, timestamptz는 epoch µs, NULL은 None.
     - 빠지거나 끝나지 않은 구획은 sections에 없고 errors에 남는다. 그 표는 빈 tuple, 지문은 None이다.

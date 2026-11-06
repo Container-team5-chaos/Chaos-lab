@@ -200,7 +200,7 @@ def test_count_check_absent_classes_are_zero():
 
 
 def test_interrupted_and_user_impact_do_not_fail():
-    """INTERRUPTED·UNRESOLVED_*는 돈 문제가 아니다(설계 5.3, 명세 4)."""
+    """INTERRUPTED·UNRESOLVED_*는 돈 문제가 아니다(설계 5.3, 계약 명세 4)."""
     counts = {
         "OK": 100,
         "INTERRUPTED": 7,

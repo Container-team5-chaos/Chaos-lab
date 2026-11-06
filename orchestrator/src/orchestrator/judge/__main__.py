@@ -51,7 +51,7 @@ from .context import (
     check_user_id,
     load_run,
 )
-from .criteria import RESOLVED_NAME, load_criteria
+from .criteria import select_criteria
 from .errors import (
     EXIT_BY_VERDICT,
     EXIT_INCONCLUSIVE,
@@ -100,7 +100,7 @@ def _epoch_ms_arg(s: str) -> int:
 
 
 def _speed_arg(s: str) -> Decimal:
-    """--speed: 0보다 큰 유한한 수. 리플레이 배속 기록이다(참고용, 판정에 쓰지 않는다. 명세 7)."""
+    """--speed: 0보다 큰 유한한 수. 리플레이 배속 기록이다(참고용, 판정에 쓰지 않는다. 계약 명세 7)."""
     try:
         v = Decimal(s.strip())
     except InvalidOperation as e:
@@ -111,7 +111,7 @@ def _speed_arg(s: str) -> Decimal:
 
 
 def _user_id_arg(s: str) -> str:
-    """--extra-account: 발표자 user_id(명세 8). 형식은 context.check_user_id와 같다."""
+    """--extra-account: 발표자 user_id(계약 명세 8). 형식은 context.check_user_id와 같다."""
     try:
         return check_user_id(s, "--extra-account")
     except InputError as e:
@@ -191,7 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
     accounts = add(
         "accounts",
         _cmd_accounts,
-        "k6 기록의 계좌 확인, idx0 user_id 출력(설계 3, 명세 8)",
+        "k6 기록의 계좌 확인, idx0 user_id 출력(설계 3, 계약 명세 8)",
     )
     accounts.add_argument(
         "--wait", action="store_true", help="첫 intent 줄이 나올 때까지 기다린다"
@@ -230,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=_user_id_arg,
         default=[],
         metavar="USER_ID",
-        help="DB 전용 검사만 받는 계좌 user_id(시연 발표자, 명세 8). 여러 번 줄 수 있다",
+        help="DB 전용 검사만 받는 계좌 user_id(시연 발표자, 계약 명세 8). 여러 번 줄 수 있다",
     )
     mark.add_argument(
         "--obs",
@@ -286,13 +286,12 @@ def _criteria(
 
     evaluate는 증거와 함께 저장된 resolved 기준만 읽는다(설계 5.2 6단계).
     """
-    if args.criteria is not None:
-        return load_criteria(args.criteria)
-    if prefer_resolved and ctx.run_dir is not None:
-        resolved = ctx.run_dir / RESOLVED_NAME
-        if resolved.is_file():
-            return load_criteria(resolved)
-    return load_criteria(ctx.criteria)
+    return select_criteria(
+        ctx.criteria,
+        ctx.run_dir,
+        override=args.criteria,
+        prefer_resolved=prefer_resolved,
+    )
 
 
 def _run_dir(ctx: RunContext) -> Path:

@@ -1,4 +1,4 @@
-"""주문 분류기 골든 테스트(계약 정렬 명세 3–5, 10, 설계 5.3)."""
+"""주문 분류기 골든 테스트(계약 명세 3–5, 10, 설계 5.3)."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ from .golden_cases import (
 REPO = Path(__file__).resolve().parents[3]
 ORDER_APP = REPO / "workloads" / "order" / "app"
 
-# 명세 10 골든 목록 → 케이스 이름
+# 계약 명세 10 골든 목록 → 케이스 이름
 REQUIRED = {
     "K_ACK×D1 일치": "ack_d1_match",
     "K_ACK×D1 불일치": "ack_d1_mismatch",
@@ -351,7 +351,7 @@ def test_window_and_account_counts():
 
 
 def test_run_order_count_matches_snapshot():
-    """분류기 D1 수 = 스냅샷 run 키 주문 수(명세 7 judge_self_check)."""
+    """분류기 D1 수 = 스냅샷 run 키 주문 수(계약 명세 7 judge_self_check)."""
     res = _mixed_result()
     db = _mixed_db(_mixed()[2])
     assert run_order_count(res, RUN_ID) == len(db.run_orders(RUN_ID)) == 6
@@ -396,7 +396,7 @@ def test_default_criteria_cfg_classifies_clean_order():
     assert r.detail["response"] == "match"
 
 
-# ---------------------------------------------------------------- K와 경로(명세 3, 4)
+# ---------------------------------------------------------------- K와 경로(계약 명세 3, 4)
 
 
 def test_k_state_table():
@@ -591,7 +591,7 @@ def test_body_mismatch_ignores_volume_notation():
 
 
 def test_body_mismatch_fails_even_when_response_unconfirmed():
-    """본문 비교는 응답 필드 확정과 무관하다(명세 4)."""
+    """본문 비교는 응답 필드 확정과 무관하다(계약 명세 4)."""
     body = default_body(K1, ACCT_A, volume="0.00020000")
     res = _single(
         [ack(body=body)],
@@ -631,7 +631,7 @@ def test_response_missing_field_is_mismatch():
     ],
 )
 def test_response_filled_at_compared_to_response_precision(filled_at, response):
-    """명세 11: filled_at은 두 형식을 모두 읽고 응답 자릿수까지만 DB 값을 내림해 비교한다.
+    """계약 명세 11: filled_at은 두 형식을 모두 읽고 응답 자릿수까지만 DB 값을 내림해 비교한다.
 
     못 읽으면 불일치가 아니라 response_unparsed(PASS만 막는 불확실성)다.
     """
@@ -727,7 +727,7 @@ def test_orphan_in_other_user_is_flagged_foreign():
 
 
 def test_orphan_needs_full_run_key_format():
-    """접두어만 같은 다른 run(r-test-2)의 키는 고아가 아니다(명세 4, model.run_key_re)."""
+    """접두어만 같은 다른 run(r-test-2)의 키는 고아가 아니다(계약 명세 4, model.run_key_re)."""
     log = make_log([], [], run_id="r-test")
     key = run_key(1, run_id="r-test-2")
     res = run(log, make_db(orders=[make_order(ACCT_A, key)]))

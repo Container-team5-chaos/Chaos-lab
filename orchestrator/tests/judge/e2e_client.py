@@ -1,9 +1,9 @@
-"""실서비스 e2e 도우미(계약 정렬 명세 2, 10). test_e2e_order_service.py가 쓴다.
+"""실서비스 e2e 도우미(계약 명세 2, 10). test_e2e_order_service.py가 쓴다.
 
 - docker 명령, 주문 서비스 프로세스, 시세 수집기 대역(Ticker), k6와 같은 JSONL v2를 쓰는
   파이썬 주문 클라이언트(Recorder), 증거 폴더 작성(write_evidence, take_snapshot)을 둔다.
 - HTTP는 표준 라이브러리(http.client)만 쓴다. 전송 오류·시간 초과는 st 0이고 ec는 k6 error_code를 흉내 낸다.
-- 요청에 Idempotency-Key 같은 헤더를 넣지 않는다. 멱등 키는 본문 client_order_id다(명세 1, 2).
+- 요청에 Idempotency-Key 같은 헤더를 넣지 않는다. 멱등 키는 본문 client_order_id다(계약 명세 1, 2).
 - 비밀번호를 코드에 두지 않는다. DB 비밀번호는 테스트가 만들고 docker·앱에 환경변수로만 넘긴다.
   judge db 번들과 시세 기록은 docker exec psql(컨테이너 안 Unix 소켓, 비밀번호 없음)로 돈다.
 """
@@ -31,7 +31,7 @@ from orchestrator.judge.model import JSONL_VERSION, Criteria, RunContext
 from orchestrator.judge.transport import Transports
 
 MARKET = "KRW-BTC"
-RAW_MAX = 2048  # attempt.raw 상한(명세 2)
+RAW_MAX = 2048  # attempt.raw 상한(계약 명세 2)
 HTTP_TIMEOUT_S = 10.0
 PG_USER = "exchange"  # 서비스 로컬 개발 기본값(docker-compose.dev.yml). 이름만 쓴다
 PG_DB = "exchange"
@@ -197,7 +197,7 @@ def _json_obj(text: str | None) -> dict[str, Any] | None:
 
 
 def post_order(port: int, body: Mapping[str, Any]) -> dict[str, Any]:
-    """POST /orders 한 번. JSONL v2 시도 하나(n 없이)를 돌려준다(명세 2).
+    """POST /orders 한 번. JSONL v2 시도 하나(n 없이)를 돌려준다(계약 명세 2).
 
     {t0, t1, st, ec, ms, rp, raw}. st 0 = 전송 오류. raw는 200·4xx·503 본문(2048자 이하).
     ec는 거절 본문의 reason(200은 null), 전송 오류면 k6 error_code 흉내. rp는 200 본문의 replayed.
@@ -305,7 +305,7 @@ class Ticker:
     """수집기(다른 파트) 대역. period마다 ticks 행을 넣고 Redis price:<market>를 지금 시각으로 쓴다.
 
     ticks 행을 먼저 넣고(received_at = DB now()) Redis를 쓴다. 그래서 그 시세로 체결된 주문의
-    filled_at(DB now())보다 tick이 앞선다(명세 7 fresh). paused() 안에서는 주기 갱신을 멈춘다.
+    filled_at(DB now())보다 tick이 앞선다(계약 명세 7 fresh). paused() 안에서는 주기 갱신을 멈춘다.
     """
 
     def __init__(
@@ -393,11 +393,11 @@ class Ticker:
             self._thread.join(timeout=30)
 
 
-# ---------------------------------------------------------------- JSONL v2 기록(명세 2)
+# ---------------------------------------------------------------- JSONL v2 기록(계약 명세 2)
 
 
 def run_key(run_id: str, vu: int, seq: int) -> str:
-    """k6 client_order_id `k6-<run_id>-<vu 4자리>-<seq 6자리>`(명세 11. 예 k6-demo-1106-0001-000042)."""
+    """k6 client_order_id `k6-<run_id>-<vu 4자리>-<seq 6자리>`(계약 명세 11. 예 k6-demo-1106-0001-000042)."""
     return f"k6-{run_id}-{vu:04d}-{seq:06d}"
 
 
@@ -407,10 +407,10 @@ def dump_line(obj: Mapping[str, Any]) -> str:
 
 @dataclass
 class Recorder:
-    """k6 스크립트처럼 주문을 보내며 JSONL v2를 쓴다(명세 2).
+    """k6 스크립트처럼 주문을 보내며 JSONL v2를 쓴다(계약 명세 2).
 
     run_start → (intent → 시도들 → result)… → run_end. 키는 k6와 같은
-    `k6-<run_id>-<vu 4자리>-<seq 6자리>`(명세 11, run_key), 1 VU = 1 user(vu n은 user-<n:04>)다.
+    `k6-<run_id>-<vu 4자리>-<seq 6자리>`(계약 명세 11, run_key), 1 VU = 1 user(vu n은 user-<n:04>)다.
     시도는 같은 키로 보낸 모든 전송이다.
     """
 
@@ -479,7 +479,7 @@ class Recorder:
     ) -> list[dict[str, Any]]:
         """같은 본문을 n개 연결로 동시에 보낸다. 시도는 보낸 시각(t0), 받은 시각(t1) 순이다.
 
-        k6는 같은 키를 겹쳐 보내지 않는다(명세 2). 겹친 시도에서는 이 순서의 n=1이 진 쪽(replayed=true)일
+        k6는 같은 키를 겹쳐 보내지 않는다(계약 명세 2). 겹친 시도에서는 이 순서의 n=1이 진 쪽(replayed=true)일
         수 있다. judge는 겹친 시도를 커밋했을 수 있는 시도로 본다(classify.ack_path).
         """
         barrier = threading.Barrier(n)
@@ -593,7 +593,7 @@ def write_evidence(
 def take_snapshot(
     run_dir: Path, ctx: RunContext, crit: Criteria, container: str
 ) -> D.PsqlRun:
-    """judge db 번들을 `docker exec -i <container> psql …`로 돌려 raw/db/snapshot.txt를 쓴다(명세 6)."""
+    """judge db 번들을 `docker exec -i <container> psql …`로 돌려 raw/db/snapshot.txt를 쓴다(계약 명세 6)."""
     bundle = D.build_bundle(ctx, stale_ms=integrity_cfg(crit).stale_ms)
     run = D.exec_bundle(
         Transports.for_local_pg(container), bundle, target=ctx.db, timeout_s=120

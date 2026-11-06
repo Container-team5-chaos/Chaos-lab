@@ -1,4 +1,4 @@
-"""분류기 골든 케이스(계약 정렬 명세 3–5, 10 "골든 최소 22건", 설계 5.3).
+"""분류기 골든 케이스(계약 명세 3–5, 10 "골든 최소 22건", 설계 5.3).
 
 케이스마다 k6 기록(JSONL v2)과 DB 스냅샷을 빌더로 만들고, 기대 클래스·K·sub·idem·summarize 수치를 둔다.
 summary에 적지 않은 핵심 수치(CORE_METRICS)는 0이어야 한다.
@@ -209,7 +209,7 @@ def _no_rows() -> DbSnapshot:
 BODY_V2 = default_body(K1, ACCT_A, volume="0.00020000")  # 보낸 것과 다른 수량의 본문
 
 
-# ---------------------------------------------------------------- 행렬 12칸(명세 4)
+# ---------------------------------------------------------------- 행렬 12칸(계약 명세 4)
 
 
 def ack_d1_match():
@@ -399,7 +399,7 @@ def rp_unknown():
     return _one([ack(None, drop=("replayed",))])
 
 
-# ---------------------------------------------------------------- 응답 대 DB 정규화(명세 5)
+# ---------------------------------------------------------------- 응답 대 DB 정규화(계약 명세 5)
 
 
 def response_notation_normalized():
@@ -422,7 +422,7 @@ FILLED_AT_UNREADABLE = "06/11/2026 09:00"
 
 
 def response_filled_at_ms_only():
-    """filled_at을 ms까지만 돌려주면(통일본 형식) DB 값도 ms까지 내림해 비교한다(명세 11)."""
+    """filled_at을 ms까지만 돌려주면(통일본 형식) DB 값도 ms까지 내림해 비교한다(계약 명세 11)."""
     return _one([ack(filled_at=FILLED_AT_MS)])
 
 
@@ -432,7 +432,7 @@ def response_filled_at_ms_differs():
 
 
 def response_filled_at_unreadable():
-    """filled_at 형식을 못 읽으면 불일치가 아니라 원문 못 읽음과 같은 불확실성이다(명세 11)."""
+    """filled_at 형식을 못 읽으면 불일치가 아니라 원문 못 읽음과 같은 불확실성이다(계약 명세 11)."""
     return _one([ack(filled_at=FILLED_AT_UNREADABLE)])
 
 
@@ -446,7 +446,7 @@ def reject_after_inflight_commit():
     행을 못 찾고 잠금을 기다린다. 첫 전송이 전량 매도를 커밋한 뒤 재전송은 바뀐 보유로 422
     insufficient_volume을 받는다. 클라이언트는 거절로 안내받았는데 돈이 움직였으므로
     REJECT_COMMITTED(lost 기준 FAIL)로 두고, detail.after_inflight와 경고 REJECT_AFTER_INFLIGHT로
-    원인을 표시한다(명세 4).
+    원인을 표시한다(계약 명세 4).
     """
     body = default_body(K1, ACCT_A, side="ask")
     return _one(
@@ -464,7 +464,7 @@ V = IdemViolation
 NE = (reasons.NOT_EVALUATED,)
 
 CASES: tuple[Golden, ...] = (
-    # 행렬(명세 4) K × D
+    # 행렬(계약 명세 4) K × D
     Golden(
         "ack_d1_match",
         ack_d1_match,
@@ -624,7 +624,7 @@ CASES: tuple[Golden, ...] = (
             "body_diff": {str(ID1): {"volume": ["0.00010000", "0.00020000"]}},
         },
     ),
-    # 멱등 위반(명세 4)
+    # 멱등 위반(계약 명세 4)
     Golden(
         "double_create",
         double_create,
@@ -682,7 +682,7 @@ CASES: tuple[Golden, ...] = (
         },
         detail={"conflict_atts": [2], "statuses": [0, 409]},
     ),
-    # DB 전용(명세 4)
+    # DB 전용(계약 명세 4)
     Golden(
         "dup_order",
         dup_order,
@@ -760,7 +760,7 @@ CASES: tuple[Golden, ...] = (
         summary={"duplicates": 1, "ok": 1},
         detail={"scope": "extra", "db_rows": 2},
     ),
-    # PROTOCOL(명세 3 "그 밖", 명세 2 intent 규칙)
+    # PROTOCOL(계약 명세 3 "그 밖", 계약 명세 2 intent 규칙)
     Golden(
         "protocol_status_201",
         protocol_status_201,
@@ -826,7 +826,7 @@ CASES: tuple[Golden, ...] = (
         marks={"resend_uncompared": 1},
         detail={"path": None, "idem_uncompared": ["att1:rp_unknown"]},
     ),
-    # 응답 대 DB(명세 5)
+    # 응답 대 DB(계약 명세 5)
     Golden(
         "response_schema_unconfirmed",
         ack_d1_mismatch,
@@ -856,7 +856,7 @@ CASES: tuple[Golden, ...] = (
         sub=OkSub.CLEAN,
         detail={"response": "match"},
     ),
-    # filled_at 자릿수(명세 11)
+    # filled_at 자릿수(계약 명세 11)
     Golden(
         "response_filled_at_ms_only",
         response_filled_at_ms_only,

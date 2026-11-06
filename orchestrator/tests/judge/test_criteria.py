@@ -1,4 +1,4 @@
-"""판정 기준 병합·검증(설계 6, 계약 정렬 명세 9)."""
+"""판정 기준 병합·검증(설계 6, 계약 명세 9)."""
 
 import hashlib
 import textwrap
@@ -185,11 +185,11 @@ def test_safety_cfg():
         markets=("KRW-BTC",), user_pattern="^user-[0-9]{4}$", user_max=1000
     )
     assert cfg.user_ok("user-0001") and not cfg.user_ok("presenter")
-    assert not cfg.user_ok("user-1001")  # 명세 11 범위
+    assert not cfg.user_ok("user-1001")  # 계약 명세 11 범위
 
 
 def test_safety_user_max_default_and_override(tmp_path):
-    """명세 11: safety.user_max는 없으면 1000을 채워 resolved에 남기고, 덮어쓸 수 있다."""
+    """계약 명세 11: safety.user_max는 없으면 1000을 채워 resolved에 남기고, 덮어쓸 수 있다."""
     c = load_criteria(put(tmp_path, "c.yaml", BASE))
     assert c.data["safety"]["user_max"] == 1000
     assert "user_max: 1000" in c.text
@@ -436,7 +436,7 @@ def test_missing_parent(tmp_path):
         "fault_effect: [{id: f1, observe: crash_restart, target: x, within_s: 0}]\n",
         "require_extra_accounts: yes please\n",
         "disable: lost\n",
-        # safety(명세 8)
+        # safety(계약 명세 8)
         "safety: {markets: []}\n",
         "safety: {markets: KRW-BTC}\n",
         "safety: {markets: [KRW-BTC, KRW-BTC]}\n",
@@ -444,11 +444,11 @@ def test_missing_parent(tmp_path):
         "safety: {user_pattern: '('}\n",
         "safety: {user_pattern: ''}\n",
         "safety: {user_pattern: 5}\n",
-        "safety: {user_max: 0}\n",  # 명세 11 범위 1..user_max
+        "safety: {user_max: 0}\n",  # 계약 명세 11 범위 1..user_max
         "safety: {user_max: '1000'}\n",
         "safety: {user_max: true}\n",
         "safety: {replace: true, markets: [KRW-BTC]}\n",  # user_pattern 없음
-        # integrity(명세 5, 7)
+        # integrity(계약 명세 5, 7)
         "integrity: {initial_krw: 1.5}\n",  # float 금액
         "integrity: {initial_krw: true}\n",
         "integrity: {initial_krw: '-1'}\n",

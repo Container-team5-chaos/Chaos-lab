@@ -1,4 +1,4 @@
-"""-m e2e: 실제 주문 서비스(workloads/order)를 띄워 judge를 끝까지 돌린다(계약 정렬 명세 10 마지막 항목).
+"""-m e2e: 실제 주문 서비스(workloads/order)를 띄워 judge를 끝까지 돌린다(계약 명세 10 마지막 항목).
 
 - docker로 postgres:16(e2e-judge-pg)과 redis:7(e2e-judge-redis)을 띄운다. 호스트 포트는 docker가
   127.0.0.1의 빈 포트를 고른다. 스키마·seed는 workloads/order/db/schema.sql·seed.sql을 그대로 넣는다.
@@ -7,7 +7,7 @@
   넘긴다(e2e_client.app_env). 셸의 STALE_MS·DB_POOL_SIZE·PG*는 넘기지 않는다(서비스 기본값을 쓴다).
   DB 비밀번호는 테스트가 그때 만든다(코드에 없다).
 - 시세는 수집기 대역(e2e_client.Ticker)이 1초마다 ticks 행과 Redis price:KRW-BTC를 함께 쓴다.
-- 파이썬 클라이언트(e2e_client.Recorder)가 k6와 같은 JSONL v2(명세 2)를 쓰며 계획 도착률대로 주문을 보낸다.
+- 파이썬 클라이언트(e2e_client.Recorder)가 k6와 같은 JSONL v2(계약 명세 2)를 쓰며 계획 도착률대로 주문을 보낸다.
   정상 매수·매도, 같은 키 재요청(replayed), 422 insufficient_volume, 503 stale_price 뒤 시세 갱신 후 같은 키
   재시도 체결, 같은 키 동시 전송, 전량 매도(volume 0, avg 유지).
 - judge db 번들은 `docker exec -i e2e-judge-pg psql -U exchange -d exchange`(Transports.for_local_pg)로 돈다.
@@ -124,7 +124,7 @@ checks: [{{id: order_p95_k6, required: false}}, {{id: order_err_k6, required: fa
 
 
 def key(vu: int, seq: int) -> str:
-    return run_key(RUN_ID, vu, seq)  # Recorder와 같은 k6 형식(명세 11)
+    return run_key(RUN_ID, vu, seq)  # Recorder와 같은 k6 형식(계약 명세 11)
 
 
 def _keys_by_path() -> dict[str, list[str]]:
@@ -296,7 +296,7 @@ def by_id(items):
 
 
 def test_scenario_hits_service_paths(run_dir):
-    """PASS가 빈말이 아니도록, 기록이 의도한 서비스 경로를 지났는지 먼저 본다(명세 1)."""
+    """PASS가 빈말이 아니도록, 기록이 의도한 서비스 경로를 지났는지 먼저 본다(계약 명세 1)."""
     res = _results(run_dir)
     assert len(res) == len(STEPS)
     for k in KEYS["once"]:
@@ -317,7 +317,7 @@ def test_scenario_hits_service_paths(run_dir):
     for k in KEYS["burst"]:
         atts = res[k]
         assert len(atts) == BURST and all(a["st"] == 200 for a in atts), atts
-        # 서비스: 하나만 새로 체결하고 나머지는 같은 행을 replayed=true로 돌려준다(명세 1 ④)
+        # 서비스: 하나만 새로 체결하고 나머지는 같은 행을 replayed=true로 돌려준다(계약 명세 1 ④)
         assert sorted(a["rp"] for a in atts) == [False] + [True] * (BURST - 1)
         assert len({json.loads(a["raw"])["order_id"] for a in atts}) == 1
     # 전량 매도한 계좌는 positions.volume 0, avg_price 유지(행이 남는다)
@@ -397,7 +397,7 @@ def test_real_service_run_passes(run_dir):
 
 
 def test_krw_tamper_fails_cash_invariant(run_dir, tmp_path):
-    """DB에서 한 계좌의 krw를 1원 바꾸고 다시 찍으면 FAIL(INTEGRITY_VIOLATION), cash 1건(명세 7)."""
+    """DB에서 한 계좌의 krw를 1원 바꾸고 다시 찍으면 FAIL(INTEGRITY_VIOLATION), cash 1건(계약 명세 7)."""
     run = tmp_path / RUN_ID
     shutil.copytree(run_dir, run)
     user = "user-0002"

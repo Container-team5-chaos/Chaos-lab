@@ -1,4 +1,4 @@
-"""오프라인 e2e: 증거 폴더 → evaluate → verdict(설계 5.1, 5.2 6단계, 5.6, 5.7, 8, 계약 정렬 명세 2–8).
+"""오프라인 e2e: 증거 폴더 → evaluate → verdict(설계 5.1, 5.2 6단계, 5.6, 5.7, 8, 계약 명세 2–8).
 
 픽스처 fixtures/run_ok/는 장애 없는 작은 run이다(JSONL v2, 새 스냅샷 형식).
 - 계좌 2개(user-0001 = vu 1, user-0002 = vu 2), intent 10건, 종목 KRW-BTC.
@@ -27,7 +27,12 @@ import orchestrator.judge.pipeline as pipeline_mod
 from orchestrator.judge import reasons as R
 from orchestrator.judge.client import phase_windows, phases_from_marks, run_window
 from orchestrator.judge.context import load_run
-from orchestrator.judge.criteria import load_criteria, write_resolved
+from orchestrator.judge.criteria import (
+    RESOLVED_NAME,
+    load_criteria,
+    select_criteria,
+    write_resolved,
+)
 from orchestrator.judge.db import parse_bundle_output, render_snapshot
 from orchestrator.judge.errors import EXIT_PASS, InputError
 from orchestrator.judge.k6log import parse_k6log
@@ -168,7 +173,7 @@ def rejected_raw(reason: str, k: str | None) -> str:
 
 
 def reject_only(st: int, ec: str):
-    """키의 시도를 확정 거절 하나로 바꾼다(명세 3 REJECT)."""
+    """키의 시도를 확정 거절 하나로 바꾼다(계약 명세 3 REJECT)."""
 
     def fn(r):
         t0 = r["atts"][0]["t0"]
@@ -244,7 +249,7 @@ def test_run_ok_passes():
     assert guards["fault_effect"].outcome is Outcome.NA
     assert guards["log_complete"].value is True
     assert guards["fill_coverage"].value == {"steady": 7, "tail": 9}
-    assert guards["sell_coverage"].value == 3  # side='ask' filled(명세 8)
+    assert guards["sell_coverage"].value == 3  # side='ask' filled(계약 명세 8)
     assert guards["safety"].detail["key_prefix"] == f"k6-{RUN_ID}-"
     assert guards["safety"].detail["markets"] == ["KRW-BTC"]
     assert guards["account_set"].value == {
@@ -279,7 +284,11 @@ def test_run_ok_passes():
         "qty": 0,
     }
     assert "db_errors" not in integ
-    assert v.inputs["criteria_sha256"] == CRIT.sha256
+    # criteria_sha256 = 기준 파일 원본 바이트(runner가 대조), resolved 해시는 따로
+    assert (
+        v.inputs["criteria_sha256"] == hashlib.sha256(CRITERIA.read_bytes()).hexdigest()
+    )
+    assert v.inputs["criteria_resolved_sha256"] == CRIT.sha256
     assert v.inputs["run_json_sha256"] == load_run(FIXTURE / "run.json").run_json_sha256
     assert v.inputs["evidence_manifest"]["raw/db/snapshot.txt"] is not None
     assert v.inputs["response_fields_confirmed"] is True
@@ -322,7 +331,7 @@ def test_lost_order_fails_with_integrity_violation(tmp_path):
 
 
 def test_deleted_row_also_breaks_balance_invariants(tmp_path):
-    """행만 지우면(잔고는 그대로) 유실과 함께 cash·qty·avg 불변식이 잡는다(명세 7)."""
+    """행만 지우면(잔고는 그대로) 유실과 함께 cash·qty·avg 불변식이 잡는다(계약 명세 7)."""
     run = copy_run(tmp_path)
     edit_snapshot(run, drop_orders(LOST_KEY, rebalanced=False))
     v = run_eval(run)
@@ -413,7 +422,7 @@ def test_no_fills_is_low_fill_coverage(tmp_path):
     ids=["cash", "qty", "avg", "arith"],
 )
 def test_balance_tamper_fails(tmp_path, tamper, inv):
-    """DB를 조작하면 해당 불변식이 잡고 FAIL(INTEGRITY_VIOLATION)이다(명세 7)."""
+    """DB를 조작하면 해당 불변식이 잡고 FAIL(INTEGRITY_VIOLATION)이다(계약 명세 7)."""
     run = copy_run(tmp_path)
     edit_snapshot(run, tamper)
     v = run_eval(run)
@@ -426,7 +435,7 @@ def test_balance_tamper_fails(tmp_path, tamper, inv):
 
 
 def test_reject_committed_fails(tmp_path):
-    """확정 거절(422)을 받았는데 DB에 행이 있다(K_REJECT × D1, 명세 4) → 유실 기준 FAIL."""
+    """확정 거절(422)을 받았는데 DB에 행이 있다(K_REJECT × D1, 계약 명세 4) → 유실 기준 FAIL."""
     run = copy_run(tmp_path)
 
     def reject(rows):
@@ -487,7 +496,7 @@ def test_dup_order_fails(tmp_path):
 
 
 def test_first_replayed_is_idempotency_violation(tmp_path):
-    """처음 보내는 키(n=1)인데 replayed=true(명세 4 FIRST_REPLAYED) → 중복 기준 FAIL."""
+    """처음 보내는 키(n=1)인데 replayed=true(계약 명세 4 FIRST_REPLAYED) → 중복 기준 FAIL."""
     run = copy_run(tmp_path)
     edit_log(run, edit_ack(LOST_KEY, replayed=True))
     v = run_eval(run)
@@ -498,7 +507,7 @@ def test_first_replayed_is_idempotency_violation(tmp_path):
 
 
 def test_response_mismatch_fails(tmp_path):
-    """원 응답(첫 ACK)의 fill_price가 DB 행과 다르다 → MISMATCH FAIL(명세 5)."""
+    """원 응답(첫 ACK)의 fill_price가 DB 행과 다르다 → MISMATCH FAIL(계약 명세 5)."""
     run = copy_run(tmp_path)
     edit_log(run, edit_ack(LOST_KEY, fill_price="101000001.00000000"))
     v = run_eval(run)
@@ -524,7 +533,7 @@ def test_response_schema_unconfirmed_blocks_pass(tmp_path):
 
 
 def test_unparsed_response_blocks_pass(tmp_path):
-    """잘린 200 원문(raw ≤ 2KB)은 ACK로 볼 수 없다(명세 3 PROTOCOL). 조용히 OK로 두지 않는다."""
+    """잘린 200 원문(raw ≤ 2KB)은 ACK로 볼 수 없다(계약 명세 3 PROTOCOL). 조용히 OK로 두지 않는다."""
     run = copy_run(tmp_path)
 
     def truncate(rows):
@@ -568,7 +577,7 @@ def test_unparsed_response_without_row_blocks_lost(tmp_path):
 
 
 def test_after_503_is_warning_not_failure(tmp_path):
-    """503 not_ready 뒤 replayed=true(커밋 뒤 연결 오류) → OK(after_503) + 경고(명세 4)."""
+    """503 not_ready 뒤 replayed=true(커밋 뒤 연결 오류) → OK(after_503) + 경고(계약 명세 4)."""
     run = copy_run(tmp_path)
     edit_log(run, edit_ack(NOT_COMMITTED_KEY, replayed=True))
     v = run_eval(run)
@@ -670,7 +679,7 @@ def test_missing_orders_section_is_db_error(tmp_path):
 
 
 def test_schema_drift_is_inconclusive(tmp_path):
-    """서비스 스키마의 UNIQUE(client_order_id)가 없다 → constraints 평가 불가(SCHEMA_DRIFT, 명세 7)."""
+    """서비스 스키마의 UNIQUE(client_order_id)가 없다 → constraints 평가 불가(SCHEMA_DRIFT, 계약 명세 7)."""
     run = copy_run(tmp_path)
 
     def drift(db):
@@ -748,11 +757,11 @@ def test_authorization_key_in_log_is_safety_violation(tmp_path):
     [
         ("safety: {markets: [KRW-ETH]}\n", "bad_market", 10),
         ("safety: {user_pattern: '^user-000[2-9]$'}\n", "bad_user", 5),
-        ("safety: {user_max: 1}\n", "bad_user", 5),  # user-0002가 범위 밖(명세 11)
+        ("safety: {user_max: 1}\n", "bad_user", 5),  # user-0002가 범위 밖(계약 명세 11)
     ],
 )
 def test_safety_markets_and_user_pattern(tmp_path, body, field, n):
-    """명세 8, 11: 모든 intent.body의 market ∈ safety.markets, user_id가 user_pattern에 전체
+    """계약 명세 8, 11: 모든 intent.body의 market ∈ safety.markets, user_id가 user_pattern에 전체
     일치하고 끝 번호가 1..safety.user_max 안이다."""
     crit = write_criteria(tmp_path, body)
     v = run_eval(FIXTURE, crit)
@@ -831,7 +840,7 @@ def _rename_key(run: Path, old: str, new: str) -> None:
 
 @pytest.mark.parametrize("length, bad", [(64, 0), (65, 1)])
 def test_safety_key_longer_than_service_limit(tmp_path, length, bad):
-    """명세 11: client_order_id는 64자 이하다(서비스 schemas.py). 전체 run 키 형식이어도 넘으면 위반."""
+    """계약 명세 11: client_order_id는 64자 이하다(서비스 schemas.py). 전체 run 키 형식이어도 넘으면 위반."""
     run = copy_run(tmp_path)
     head = f"k6-{RUN_ID}-1-"
     # 숫자 묶음만 늘린 같은 run 키(seq 2)
@@ -857,7 +866,7 @@ def test_safety_key_longer_than_service_limit(tmp_path, length, bad):
     ],
 )
 def test_safety_one_vu_one_user(tmp_path, remap, field):
-    """1 VU = 1 user(명세 8)를 judge가 다시 본다."""
+    """1 VU = 1 user(계약 명세 8)를 judge가 다시 본다."""
     run = copy_run(tmp_path)
 
     def fn(rows):
@@ -891,7 +900,7 @@ def drop_user_b(db):
 
 
 def test_account_set_mismatch(tmp_path):
-    """JSONL의 user_id가 DB accounts에 없다 → ACCOUNT_SET_MISMATCH, LOST·ORPHAN 보류(명세 8)."""
+    """JSONL의 user_id가 DB accounts에 없다 → ACCOUNT_SET_MISMATCH, LOST·ORPHAN 보류(계약 명세 8)."""
     run = copy_run(tmp_path)
     edit_snapshot(run, drop_user_b)
     v = run_eval(run, write_criteria(tmp_path, LOW_COVERAGE))
@@ -957,7 +966,7 @@ def test_snapshot_large_is_warning(tmp_path, monkeypatch):
 
 
 def test_judge_self_check_reports_classifier_gap(monkeypatch):
-    """분류기 D1 수가 스냅샷 run 키 주문 수와 다르면 JUDGE_SELF_CHECK(보고만, 명세 7)."""
+    """분류기 D1 수가 스냅샷 run 키 주문 수와 다르면 JUDGE_SELF_CHECK(보고만, 계약 명세 7)."""
     monkeypatch.setattr(pipeline_mod, "run_order_count", lambda result, run_id: 8)
     v = run_eval(FIXTURE)
     sc = by_id(v.checks)["judge_self_check"]
@@ -1083,9 +1092,13 @@ def test_fault_effect_disable_same_verdict_from_resolved(tmp_path):
         encoding="utf-8",
     )
     source = load_criteria(p)
-    resolved = load_criteria(write_resolved(source, tmp_path / "resolved.yaml"))
-    assert source.sha256 == resolved.sha256
     run = fault_run(tmp_path / "run", start=T0 + 4000, end=T0 + 5000)
+    write_resolved(source, run)
+    # 증거 판정은 resolved를 읽되 inputs.criteria_sha256은 run.json이 가리키는 원본 파일 값이다
+    resolved = select_criteria(p, run, prefer_resolved=True)
+    assert resolved.source == run / RESOLVED_NAME
+    assert source.sha256 == resolved.sha256
+    assert source.file_sha256 == resolved.file_sha256
     v1, v2 = run_eval(run, source), run_eval(run, resolved)
     assert v1.verdict_digest == v2.verdict_digest
     item = by_id(v1.guards)["crash_restart"]
@@ -1233,3 +1246,41 @@ def test_shuffled_lines_same_verdict_body(tmp_path):
             d["load"].pop(k)
     assert a == b
     assert b["verdict"] == "PASS"
+
+
+@pytest.mark.parametrize("cmd", ["evaluate", "run"])
+def test_verdict_passes_runner_acceptance(tmp_path, cmd):
+    """A의 수용 조건(orchestrator.judging.accept, PR #5)을 judge 출력이 그대로 통과한다.
+
+    runner는 `python -m orchestrator.judge run --run … [--offline]`을 부르고 run.json criteria
+    파일 원본 바이트의 sha256을 verdict inputs.criteria_sha256과 대조한다(설계 1.4).
+    resolved 기준으로 판정해도 그 값은 run.json이 가리키는 원본 파일 값이어야 한다.
+    """
+    from orchestrator.judging import accept
+
+    run = copy_run(tmp_path)  # criteria.resolved.yaml이 함께 있다
+    run_json = run / "run.json"
+    rc = cli.main([cmd, "--run", str(run_json), "--offline"])
+    verdict = json.loads((run / "verdict.json").read_text(encoding="utf-8"))
+    got = accept(rc, verdict, run_json, load_run(run_json).run_id)
+    assert got.passed, got.details
+    raw = hashlib.sha256((run / "criteria.yaml").read_bytes()).hexdigest()
+    assert verdict["inputs"]["criteria_sha256"] == raw
+    assert verdict["inputs"]["criteria_resolved_sha256"] == CRIT.sha256
+
+
+def test_runner_acceptance_fails_when_criteria_file_changes(tmp_path):
+    """판정 뒤 run.json의 기준 파일이 바뀌면 runner 대조가 실패한다(바뀐 기준의 판정이 아니다)."""
+    from orchestrator.judging import accept
+
+    run = copy_run(tmp_path)
+    run_json = run / "run.json"
+    rc = cli.main(["evaluate", "--run", str(run_json), "--offline"])
+    verdict = json.loads((run / "verdict.json").read_text(encoding="utf-8"))
+    crit_file = run / "criteria.yaml"
+    crit_file.write_text(
+        crit_file.read_text(encoding="utf-8") + "# 바뀜\n", encoding="utf-8"
+    )
+    got = accept(rc, verdict, run_json, load_run(run_json).run_id)
+    assert not got.passed
+    assert got.details["checks"]["criteria_sha256"] is False

@@ -1,4 +1,4 @@
-"""report.md 조각(설계 5.8, 9 시연 최소선, 계약 정렬 명세 4·7 이름)."""
+"""report.md 조각(설계 5.8, 9 시연 최소선, 계약 명세 4·7 이름)."""
 
 from decimal import Decimal
 
@@ -281,7 +281,7 @@ def test_table_cells_are_escaped():
 
 
 def test_remedy_covers_contract_reasons_only():
-    """옛 계약 사유는 없다. 새 사유(SCHEMA_DRIFT, SNAPSHOT_LARGE)는 해소 방법이 있다(명세 6, 7)."""
+    """옛 계약 사유는 없다. 새 사유(SCHEMA_DRIFT, SNAPSHOT_LARGE)는 해소 방법이 있다(계약 명세 6, 7)."""
     assert {R.SCHEMA_DRIFT, R.SNAPSHOT_LARGE, R.JUDGE_SELF_CHECK} <= set(REMEDY)
     assert set(REMEDY) <= R.ALL_REASONS
     assert not any("pt_ro" in t or "REPLAY" in t for t in REMEDY.values())

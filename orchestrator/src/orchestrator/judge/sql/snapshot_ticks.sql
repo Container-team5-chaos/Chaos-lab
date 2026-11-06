@@ -1,4 +1,4 @@
--- snapshot_ticks (계약 정렬 명세 6, 7 fresh). run 주문(+extra 계좌 주문) 종목의 ticks 중 체결 시각 범위 안의 것.
+-- snapshot_ticks (계약 명세 6, 7 fresh). run 주문(+extra 계좌 주문) 종목의 ticks 중 체결 시각 범위 안의 것.
 -- 범위(market별): [min(filled_at) - stale_ms - tick_slack_ms, max(filled_at) + tick_slack_ms].
 -- 주문마다의 fresh 창 [filled_at - stale_ms - 1s, filled_at + 1s]을 모두 덮는다.
 -- run 주문은 client_order_id가 run_key_re(`^k6-<run_id>-[0-9]+-[0-9]+$`)에 맞는 것이다(접두어만 보지 않는다).

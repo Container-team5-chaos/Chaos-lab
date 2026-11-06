@@ -1,4 +1,4 @@
-"""테스트용 빌더. 골든 테스트가 K6Log·DbSnapshot을 파서 없이 직접 만든다(계약 정렬 명세 1–7).
+"""테스트용 빌더. 골든 테스트가 K6Log·DbSnapshot을 파서 없이 직접 만든다(계약 명세 1–7).
 
 기본값은 서로 맞물린다: make_intent 본문 = make_order 본문, make_result의 ACK 응답 =
 make_order 행(order_to_dict 모양). make_db는 주문에서 accounts.krw와 positions를 서비스 공식대로
@@ -114,7 +114,7 @@ def default_body(
     side: str = SIDE_BID,
     volume: str = VOLUME,
 ) -> dict[str, str]:
-    """intent.body = 보낸 주문 본문(명세 2)."""
+    """intent.body = 보낸 주문 본문(계약 명세 2)."""
     return {
         "client_order_id": key,
         "user_id": acct,

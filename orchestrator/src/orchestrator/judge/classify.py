@@ -1,12 +1,12 @@
-"""주문 분류기(계약 정렬 명세 3–5, 설계 5.3).
+"""주문 분류기(계약 명세 3–5, 설계 5.3).
 
 k6 기록(K6Log, JSONL v2)과 DB 스냅샷(DbSnapshot)을 client_order_id 단위로 맞춰 본다.
 
 - 시도 성격(ACK·REJECT·UNKNOWN·PROTOCOL)은 model.attempt_kind, 키별 K는 k_state다.
-  ACK가 없고 마지막 시도가 PROTOCOL이거나 시도가 없으면 K_UNKNOWN이다(명세 3이 정하지 않은 칸.
+  ACK가 없고 마지막 시도가 PROTOCOL이거나 시도가 없으면 K_UNKNOWN이다(계약 명세 3이 정하지 않은 칸.
   클라이언트가 결과를 해석하지 못했다). 이때 PROTOCOL이 함께 붙는다.
-- 행렬(명세 4): K × D. D1 = 그 client_order_id의 orders 행이 있다. K_ACK × D1의 일치는
-  첫 ACK 본문 대 DB 행이다(명세 5 매핑, cfg.response_fields).
+- 행렬(계약 명세 4): K × D. D1 = 그 client_order_id의 orders 행이 있다. K_ACK × D1의 일치는
+  첫 ACK 본문 대 DB 행이다(계약 명세 5 매핑, cfg.response_fields).
 - 행 하나 = 보낸 키 하나(intent 또는 result가 있는 키), 또는 DB 전용 행(ORPHAN, 범위 안 계좌의 이상).
 - 주 클래스는 DUP_ORDER → PROTOCOL → 행렬 칸(OK 아님) → BODY_MISMATCH → FILL_STATE →
   IDEMPOTENCY_VIOLATION 중 처음 나오는 것이다. 하나도 없으면 OK다. 나머지는 detail["also"]에 둔다.
@@ -16,7 +16,7 @@ k6 기록(K6Log, JSONL v2)과 DB 스냅샷(DbSnapshot)을 client_order_id 단위
 - 비교는 model.order_value로 정규화한다. 숫자는 Decimal, 시각은 instant(µs), id는 int다.
   바꿀 수 없는 값은 불일치다. 단 응답 시각(filled_at 등)은 응답에 적힌 소수 자릿수까지만 DB 값을
   내림해 비교하고(밀리초 Z, 마이크로초 +00:00 모두 읽는다), 못 읽으면 불일치가 아니라
-  불확실성이다(명세 11, _same_instant).
+  불확실성이다(계약 명세 11, _same_instant).
 - 불확실성은 marks로 센다. PASS만 막는다(판정 몫, 설계 5.7 규칙 4). 200인데 원문 또는 응답
   시각을 못 읽음(response_unparsed·lost_unknown), replayed를 못 읽어 멱등 검사를 다 못 함
   (resend_uncompared), 보낸 본문이 없어 본문 비교를 못 함(body_missing).
@@ -80,7 +80,7 @@ __all__ = [
     "summarize",
 ]
 
-CONFLICT_STATUS = 409  # idempotency_conflict(명세 1)
+CONFLICT_STATUS = 409  # idempotency_conflict(계약 명세 1)
 # OkSub가 아닌 ACK 경로. 첫 ACK rp=true인데 앞에 결과 불명 시도가 없다(FIRST_REPLAYED)
 FIRST_REPLAYED_PATH = "first_replayed"
 OK_SUB_VALUES = frozenset(s.value for s in OkSub)
@@ -137,11 +137,11 @@ def classify(
     account_ids: frozenset[str] | None = None,
     extra_account_ids: frozenset[str] | None = None,
 ) -> ClassifyResult:
-    """k6 기록과 DB를 키 단위로 분류한다(명세 4, 설계 5.3).
+    """k6 기록과 DB를 키 단위로 분류한다(계약 명세 4, 설계 5.3).
 
     account_ids: 이번 run 계좌(user_id). None이면 log.account_ids(intent의 user_id).
       run 키가 아닌 이 계좌 주문은 DB 전용 이상(DUP_ORDER, FILL_STATE)이 있을 때만 행을 만든다
-      (detail.scope "account"). ORPHAN은 계좌가 아니라 run 키 형식으로 정한다(명세 4).
+      (detail.scope "account"). ORPHAN은 계좌가 아니라 run 키 형식으로 정한다(계약 명세 4).
     extra_account_ids: 발표자 계좌(run.json extra_accounts). None이면 없다.
       이 계좌 주문은 DB 전용 이상이 있을 때만 행을 만든다(detail.scope "extra").
     ACCOUNT_SET_MISMATCH일 때 LOST·ORPHAN을 빼는 일은 판정(summarize, pipeline) 몫이다.
@@ -243,7 +243,7 @@ def count_filled(
     end: int | None = None,
     accounts: Iterable[str] | None = None,
 ) -> int:
-    """status 'filled' 주문 수(설계 5.5 filled·sell_filled, 명세 8). side는 'bid' 또는 'ask'.
+    """status 'filled' 주문 수(설계 5.5 filled·sell_filled, 계약 명세 8). side는 'bid' 또는 'ask'.
 
     범위 밖 계좌의 이상 행(detail.scope extra·account)은 이번 run 주문이 아니라 뺀다.
     """
@@ -258,7 +258,7 @@ def count_filled(
 
 def run_order_count(result: ClassifyResult, run_id: str) -> int:
     """run 키 형식 행에 매칭된 DB 주문 수(분류기의 D1 수). judge_self_check가
-    스냅샷 run 키 주문 수(DbSnapshot.run_orders)와 맞춰 본다(명세 7)."""
+    스냅샷 run 키 주문 수(DbSnapshot.run_orders)와 맞춰 본다(계약 명세 7)."""
     return sum(len(c.order_ids) for c in result.classified if is_run_key(c.key, run_id))
 
 
@@ -337,11 +337,11 @@ def summarize(
     return out
 
 
-# ---------------------------------------------------------------- 시도 해석(명세 3, 4)
+# ---------------------------------------------------------------- 시도 해석(계약 명세 3, 4)
 
 
 def k_state(result: Result | None) -> KState:
-    """키별 클라이언트 상태 K(명세 3).
+    """키별 클라이언트 상태 K(계약 명세 3).
 
     ACK가 없고 마지막 시도가 PROTOCOL이거나 시도가 없으면 K_UNKNOWN이다(모듈 docstring).
     """
@@ -369,10 +369,10 @@ def ack_path(atts: Sequence[Attempt]) -> str | None:
       find_order가 잠금 밖이라 재전송이 앞 시도의 잠금을 기다린 뒤 바뀐 잔고로 422를 받는다).
       그래서 [결과 불명, 확정 거절] × D1도 K_REJECT라 REJECT_COMMITTED다. 클라이언트는 거절로
       안내받고 돈은 움직였으므로 FAIL로 두고, detail.after_inflight와 경고 REJECT_AFTER_INFLIGHT로
-      원인(서비스 경합)을 표시한다(명세 4).
+      원인(서비스 경합)을 표시한다(계약 명세 4).
     - 겹친 시도: 첫 ACK가 rp=true면, 첫 ACK가 끝나기 전에 시작한(t0 < 첫 ACK t1) 뒤 번호 시도도
       커밋됐을 수 있는 시도로 본다(rp=true ACK와 확정 거절은 뺀다). 같은 키 동시 전송(서비스 ④)이면
-      t0 순서의 n=1이 진 쪽일 수 있다(실서비스 e2e). k6는 같은 키를 순차로만 보내므로(명세 2)
+      t0 순서의 n=1이 진 쪽일 수 있다(실서비스 e2e). k6는 같은 키를 순차로만 보내므로(계약 명세 2)
       순차 기록의 결과는 같다.
     """
     idx = next((i for i, a in enumerate(atts) if a.is_ack), None)
@@ -414,7 +414,7 @@ def _replayed(a: Attempt) -> tuple[bool | None, bool]:
 def _idem(
     atts: Sequence[Attempt], pairs: tuple[tuple[str, str], ...]
 ) -> tuple[tuple[IdemViolation, ...], dict[str, Any], list[str]]:
-    """멱등 위반(명세 4). (위반, detail, 비교 못 한 시도 메모).
+    """멱등 위반(계약 명세 4). (위반, detail, 비교 못 한 시도 메모).
 
     RESEND_DIFF는 두 번째 이후 ACK의 의미 필드가 첫 ACK와 다를 때다. 첫 ACK 뒤 확정 거절도
     재요청 결과가 원 응답과 다른 것으로 본다(이미 있는 키라 서비스는 replay해야 한다).
@@ -457,13 +457,15 @@ def _idem(
 
     conflicts = [a.n for a in atts if a.st == CONFLICT_STATUS]
     if conflicts:
-        found.add(IdemViolation.SAME_BODY_409)  # k6는 늘 같은 본문을 보낸다(명세 2)
+        found.add(
+            IdemViolation.SAME_BODY_409
+        )  # k6는 늘 같은 본문을 보낸다(계약 명세 2)
         detail["conflict_atts"] = conflicts
     return tuple(v for v in IdemViolation if v in found), detail, uncompared
 
 
 def _db_key(key: str, intent: Intent | None) -> str:
-    """DB와 맞춰 볼 키. 서버가 저장한 것은 본문의 client_order_id다(명세 4).
+    """DB와 맞춰 볼 키. 서버가 저장한 것은 본문의 client_order_id다(계약 명세 4).
 
     intent.key와 본문 키가 다르면 k6 기록 결함이다. 본문 키로 DB를 찾아 서버 쪽 결과를 그대로
     판정하고, 결함은 PROTOCOL(intent_key)과 safety 가드가 잡는다. intent 키로 찾으면 정상 체결이
@@ -477,7 +479,7 @@ def _db_key(key: str, intent: Intent | None) -> str:
 
 
 def _protocol_notes(intent: Intent | None, result: Result | None) -> list[str]:
-    """형식 위반(명세 3 "그 밖" 시도, 명세 2 intent 규칙). 비면 없음."""
+    """형식 위반(계약 명세 3 "그 밖" 시도, 계약 명세 2 intent 규칙). 비면 없음."""
     notes: list[str] = []
     if intent is not None:
         b = intent.body
@@ -543,7 +545,7 @@ def _classify_sent(
     if uncompared:
         detail["idem_uncompared"] = uncompared
 
-    # 보낸 본문 대 DB(K와 무관하게, 명세 4)
+    # 보낸 본문 대 DB(K와 무관하게, 계약 명세 4)
     body_diff: dict[str, Any] = {}
     if orders:
         if intent is None or _body_missing(intent):
@@ -560,7 +562,7 @@ def _classify_sent(
     if fill:
         detail["fill"] = fill
 
-    # 원 응답 대 DB(K_ACK × D1, 명세 5)
+    # 원 응답 대 DB(K_ACK × D1, 계약 명세 5)
     resp_diff: dict[str, Any] = {}
     first_ack = result.first_ack if result is not None else None
     if first_ack is not None and orders:
@@ -570,7 +572,7 @@ def _classify_sent(
             detail["response"] = "mismatch"
             detail["response_diff"] = resp_diff
         else:
-            # 못 읽은 시각만 남으면 일치를 확인하지 못했다(명세 11, 원문 못 읽음과 같은 불확실성)
+            # 못 읽은 시각만 남으면 일치를 확인하지 못했다(계약 명세 11, 원문 못 읽음과 같은 불확실성)
             detail["response"] = "unparsed" if unread else "match"
         if unread:
             detail["response_unparsed"] = unread
@@ -667,7 +669,7 @@ def _compose(
     return found[0], also
 
 
-# ---------------------------------------------------------------- DB 전용(명세 4)
+# ---------------------------------------------------------------- DB 전용(계약 명세 4)
 
 
 def _classify_db_only(
@@ -747,7 +749,7 @@ def _fill_state(orders: Iterable[DbOrder]) -> list[str]:
     return notes
 
 
-# ---------------------------------------------------------------- 비교 도우미(명세 5)
+# ---------------------------------------------------------------- 비교 도우미(계약 명세 5)
 
 
 def _norm(column: str, v: Any) -> Any:
@@ -815,7 +817,7 @@ def _response_diff(
 ) -> tuple[dict[str, list[Any]], list[str]]:
     """원 응답 대 DB 행(cfg.response_fields: 응답 필드 → 열). (불일치, 못 읽은 시각 필드).
 
-    응답에 필드가 없으면 null로 본다. 시각 열은 _same_instant로 비교한다(명세 11).
+    응답에 필드가 없으면 null로 본다. 시각 열은 _same_instant로 비교한다(계약 명세 11).
     """
     diff: dict[str, list[Any]] = {}
     unread: list[str] = []
@@ -838,7 +840,7 @@ def _response_diff(
 
 
 def _same_instant(got: Any, want: int | None) -> bool | None:
-    """응답 시각 대 DB 시각(epoch µs). 응답에 적힌 초 소수 자릿수 p까지만 비교한다(명세 11).
+    """응답 시각 대 DB 시각(epoch µs). 응답에 적힌 초 소수 자릿수 p까지만 비교한다(계약 명세 11).
 
     둘 다 10^(6−p) µs 단위로 내림한다(밀리초 응답이면 밀리초까지, 7자리 이상은 µs까지).
     없거나 빈 값은 null이다. 문자열인데 초까지 적지 않았거나 시간대가 없는 등 못 읽으면 None
@@ -880,7 +882,7 @@ def _body_diff(intent: Intent, order: DbOrder) -> dict[str, list[Any]]:
 
 
 def _db_facts(orders: Iterable[DbOrder]) -> dict[str, list[str | None]]:
-    """주문별 status·side(id 순). 체결 커버리지 집계에 쓴다(설계 5.5, 명세 8)."""
+    """주문별 status·side(id 순). 체결 커버리지 집계에 쓴다(설계 5.5, 계약 명세 8)."""
     rows = sorted(orders, key=lambda o: o.id)
     if not rows:
         return {}

@@ -10,7 +10,7 @@ fragment(verdict)는 Verdict만 읽는 순수 함수다. 현재 시각·generate
 - integrity.classes: OrderClass 값 → 건수. integrity.subs: OkSub 값 → 건수.
 - integrity.not_evaluated: 평가하지 않은 클래스 → 사유("*"는 전부). 그 클래스가 든 수치는
   확정 값처럼 쓰지 않는다. 아는 부분만 있으면 '≥n(사유)', 없으면 '?(사유)'다(설계 5.3, 5.7 규칙 1).
-- integrity.invariants: 불변식 id(cash, qty, avg, nonneg, arith, constraints, fresh, 명세 7) → 위반 수.
+- integrity.invariants: 불변식 id(cash, qty, avg, nonneg, arith, constraints, fresh, 계약 명세 7) → 위반 수.
   None은 평가하지 못함(DB_ERROR, SCHEMA_DRIFT, ticks 없음 등). 값이 {"count"|"violations": n} 맵이어도
   읽는다. 잔고 불일치 = cash + qty + avg. fresh가 없으면 checks의 stale_fill 값을 쓴다.
 - client.phases: 구간 → {"n", "ack_p95_ms", "sys_err_ratio", "achieved_ratio"}.
@@ -43,9 +43,9 @@ from .verdict import effective_outcome, item_reasons
 
 __all__ = ["fragment", "summary_line", "REMEDY", "BALANCE_INVARIANTS"]
 
-# 잔고 불일치 = cash + qty + avg(명세 7. 현금 보존식, 수량 보존식, 평균가 재생)
+# 잔고 불일치 = cash + qty + avg(계약 명세 7. 현금 보존식, 수량 보존식, 평균가 재생)
 BALANCE_INVARIANTS = ("cash", "qty", "avg")
-STALE_FILL_INVARIANT = "fresh"  # 명세 7 fresh(선택)
+STALE_FILL_INVARIANT = "fresh"  # 계약 명세 7 fresh(선택)
 STALE_FILL_CHECK_ID = "stale_fill"  # default.yaml 기준 id
 
 PHASE_ORDER = ("warmup", "baseline", "fault", "recovery", "tail", "steady")
@@ -257,7 +257,7 @@ def summary_line(verdict: Verdict) -> str:
 
 
 def _recovered_line(v: Verdict) -> str:
-    """커밋 후 회수(명세 4): 결과 불명 시도가 커밋됐고 같은 키 재전송이 replayed로 돌려받았다."""
+    """커밋 후 회수(계약 명세 4): 결과 불명 시도가 커밋됐고 같은 키 재전송이 replayed로 돌려받았다."""
     return f"커밋 후 회수 {_n(_sub(v, OkSub.AFTER_COMMIT))}건(after_commit)"
 
 
@@ -429,6 +429,7 @@ def _inconclusive_section(v: Verdict) -> list[str]:
 def _evidence_section(v: Verdict) -> list[str]:
     keys = (
         "criteria_sha256",
+        "criteria_resolved_sha256",
         "run_json_sha256",
         "evidence_manifest_sha256",
         "judge_version",

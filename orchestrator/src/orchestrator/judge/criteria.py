@@ -10,16 +10,17 @@
   on_violation 기본값은 checks가 fail, guards·fault_effect가 inconclusive(5.6 가드).
 - 결과는 정렬된 키의 YAML(criteria.resolved.yaml)과 그 sha256이다.
   resolved 파일을 다시 load_criteria로 읽으면 같은 내용·같은 해시가 나온다.
-- 계약 정렬 명세 9, 11: safety는 markets·user_pattern·user_max, integrity는 response_fields(응답
+- 계약 명세 9, 11: safety는 markets·user_pattern·user_max, integrity는 response_fields(응답
   필드 → orders 열)·response_fields_confirmed·initial_krw·stale_ms다. user_max·initial_krw·stale_ms는
   없으면 기본값을 채운다(resolved에 남는다). 옛 키(symbol_prefix, account_mode, price_max_age_ms)는
   거부한다.
-- integrity 항목의 sql:은 DB 불변식 id 목록(model.INVARIANTS), check:는 fresh다(명세 7).
+- integrity 항목의 sql:은 DB 불변식 id 목록(model.INVARIANTS), check:는 fresh다(계약 명세 7).
 """
 
 from __future__ import annotations
 
 import copy
+import dataclasses
 import math
 import re
 from collections.abc import Callable, Mapping
@@ -43,12 +44,14 @@ from .model import (
     OkSub,
     OrderClass,
     SafetyCfg,
+    sha256_bytes,
     sha256_text,
 )
 
 __all__ = [
     "Criteria",
     "load_criteria",
+    "select_criteria",
     "integrity_cfg",
     "safety_cfg",
     "write_resolved",
@@ -84,7 +87,7 @@ PHASE_NAMES = frozenset({"warmup", "baseline", "fault", "recovery", "tail", "ste
 OPS = frozenset({"==", "!=", "<", "<=", ">", ">="})
 ON_VIOLATION = frozenset({"fail", "inconclusive"})
 CHECK_KINDS = frozenset({"integrity", "unresolved", "client", "prom", "k6"})
-KNOWN_CHECKS = frozenset(INTEGRITY_CHECKS)  # check: 이름(명세 7 fresh)
+KNOWN_CHECKS = frozenset(INTEGRITY_CHECKS)  # check: 이름(계약 명세 7 fresh)
 K6_CHECKS = frozenset({"exit_code"})
 CLIENT_STATS = frozenset(
     {
@@ -96,7 +99,7 @@ CLIENT_STATS = frozenset(
         "sell_filled",
     }
 )
-KNOWN_SQL = frozenset(INVARIANTS)  # sql: 이름(명세 7 DB 불변식)
+KNOWN_SQL = frozenset(INVARIANTS)  # sql: 이름(계약 명세 7 DB 불변식)
 KNOWN_GUARDS = frozenset(
     {
         "safety",
@@ -114,7 +117,7 @@ KNOWN_GUARDS = frozenset(
     }
 )
 FAULT_OBSERVE = frozenset({"pod_replaced", "crash_restart"})
-# 없앤 키 → 안내(명세 9). 모르는 키보다 먼저 알려 준다.
+# 없앤 키 → 안내(계약 명세 9). 모르는 키보다 먼저 알려 준다.
 REMOVED_KEYS = {
     "safety": {
         "symbol_prefix": "safety.markets",
@@ -122,9 +125,9 @@ REMOVED_KEYS = {
     },
     "integrity": {"price_max_age_ms": "integrity.stale_ms"},
 }
-# 없으면 채우는 기본값(명세 7. 근거 seed.sql, app/config.py STALE_MS)
+# 없으면 채우는 기본값(계약 명세 7. 근거 seed.sql, app/config.py STALE_MS)
 INTEGRITY_DEFAULTS = {"initial_krw": DEFAULT_INITIAL_KRW, "stale_ms": DEFAULT_STALE_MS}
-# 명세 11. 근거 seed.sql user-0001..1000
+# 계약 명세 11. 근거 seed.sql user-0001..1000
 SAFETY_DEFAULTS = {"user_max": DEFAULT_USER_MAX}
 RESPONSE_FIELD_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
 MARKET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
@@ -170,9 +173,43 @@ def load_criteria(path: str | Path) -> Criteria:
         text=text,
         sha256=sha256_text(text),
         source=src,
+        file_sha256=_file_sha256(src),
         chain=tuple(chain),
         disabled=tuple(sorted(disabled)),
     )
+
+
+def select_criteria(
+    run_criteria: str | Path,
+    run_dir: str | Path | None,
+    *,
+    override: str | Path | None = None,
+    prefer_resolved: bool = False,
+) -> Criteria:
+    """판정에 쓸 기준. --criteria > (증거 판정이면) runs/<id>/criteria.resolved.yaml > run.json criteria.
+
+    resolved를 읽으면 file_sha256은 run.json이 가리키는 원본 파일 값으로 바꾼다. runner는
+    verdict inputs.criteria_sha256을 run.json criteria 파일과 대조하기 때문이다
+    (orchestrator.judging.accept). 원본이 없으면 resolved 파일 값이 남아 대조가 실패한다.
+    """
+    if override is not None:
+        return load_criteria(override)
+    if prefer_resolved and run_dir is not None:
+        resolved = Path(run_dir) / RESOLVED_NAME
+        if resolved.is_file():
+            crit = load_criteria(resolved)
+            declared = Path(run_criteria)
+            if declared.is_file():
+                crit = dataclasses.replace(crit, file_sha256=_file_sha256(declared))
+            return crit
+    return load_criteria(run_criteria)
+
+
+def _file_sha256(path: Path) -> str:
+    try:
+        return sha256_bytes(path.read_bytes())
+    except OSError as e:
+        raise InputError(f"{path}: 읽을 수 없다({e.strerror or e})") from e
 
 
 def dump_resolved(data: Mapping[str, Any]) -> str:
@@ -207,7 +244,7 @@ def integrity_cfg(crit: Criteria) -> IntegrityCfg:
 
 
 def safety_cfg(crit: Criteria) -> SafetyCfg:
-    """기준의 safety 맵을 SafetyCfg로 바꾼다(명세 8)."""
+    """기준의 safety 맵을 SafetyCfg로 바꾼다(계약 명세 8)."""
     sec = crit.data["safety"]
     return SafetyCfg(
         markets=tuple(sec["markets"]),
@@ -496,7 +533,7 @@ def _v_krw(v: Any, where: str) -> None:
 
 
 def _v_response_fields(v: Any, where: str) -> None:
-    """응답 필드 → orders 열(명세 5). replayed·reason은 비교 필드가 아니다."""
+    """응답 필드 → orders 열(계약 명세 5). replayed·reason은 비교 필드가 아니다."""
     if not isinstance(v, dict) or not v:
         raise _err(where, "비어 있지 않은 맵이어야 한다(응답 필드 → orders 열)")
     for k, col in v.items():
@@ -761,7 +798,9 @@ def _reject_removed(sec: Any, name: str, where: str) -> None:
     old = sorted(set(sec) & set(REMOVED_KEYS.get(name, {})))
     if old:
         hint = ", ".join(f"{k} → {REMOVED_KEYS[name][k]}" for k in old)
-        raise _err(f"{where}: {name}", f"옛 계약 키 {old}는 없앴다({hint}, 명세 9)")
+        raise _err(
+            f"{where}: {name}", f"옛 계약 키 {old}는 없앴다({hint}, 계약 명세 9)"
+        )
 
 
 def _fill_integrity_defaults(sec: dict[str, Any]) -> None:

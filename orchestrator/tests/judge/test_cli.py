@@ -450,7 +450,7 @@ def test_psql_argv_prefix_swap():
     assert Transports().psql_argv() == CMD_PREFIX + tail + PSQL_ARGS
     assert Transports.for_local_pg().psql_argv() == TEST_PSQL_PREFIX + PSQL_ARGS
     assert PSQL_ARGS[-6:] == ("-U", "exchange", "-d", "exchange", "-f", "-")
-    # run.json db 대상(명세 6). container가 있으면 -c를 붙인다. 비밀번호 인자는 없다
+    # run.json db 대상(계약 명세 6). container가 있으면 -c를 붙인다. 비밀번호 인자는 없다
     t = DbTarget(pod="pg-1", container="postgres", user="u1", database="d1")
     argv = Transports().psql_argv(t)
     assert argv == CMD_PREFIX + (

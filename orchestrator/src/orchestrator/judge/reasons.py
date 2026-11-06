@@ -1,4 +1,4 @@
-"""verdict 사유·경고 코드(설계 4.7, 4.8, 5.3–5.10, 계약 정렬 명세 4–8).
+"""verdict 사유·경고 코드(설계 4.7, 4.8, 5.3–5.10, 계약 명세 4–8).
 
 모든 대문자 사유 코드는 여기에만 둔다. 다른 모듈은 문자열을 직접 쓰지 말고 여기서 가져온다.
 옛 계약 코드(TRANSPORT_REPLAY_POSSIBLE, APP_MAX_AGE_DIFFERS, NO_SPEED_TIMELINE,
@@ -30,7 +30,7 @@ EXTRA_ACCOUNTS_MISSING = "EXTRA_ACCOUNTS_MISSING"  # require_extra_accounts인�
 CLOCK_SKEW = "CLOCK_SKEW"
 LOW_SAMPLES = "LOW_SAMPLES"
 
-# 불변식 보조(명세 7)
+# 불변식 보조(계약 명세 7)
 JUDGE_SELF_CHECK = "JUDGE_SELF_CHECK"  # run 키 주문 수(SQL·스냅샷) ≠ 분류기 D1 수
 # constraints: 테이블·열·UNIQUE·CHECK가 서비스 스키마와 다르다(INCONCLUSIVE)
 SCHEMA_DRIFT = "SCHEMA_DRIFT"
@@ -56,11 +56,11 @@ OBSERVATION_TOO_SHORT = "OBSERVATION_TOO_SHORT"
 NOT_RECOVERED_BY_DEADLINE = "NOT_RECOVERED_BY_DEADLINE"
 
 # 경고(판정을 바꾸지 않는다)
-ROLLBACK_REPLY_COMMITTED = "ROLLBACK_REPLY_COMMITTED"  # 명세 4 after_503
-# 명세 4: 결과 불명 시도 뒤 확정 거절인데 DB에 행이 있다(앞 시도가 늦게 커밋, REJECT_COMMITTED에 붙는다)
+ROLLBACK_REPLY_COMMITTED = "ROLLBACK_REPLY_COMMITTED"  # 계약 명세 4 after_503
+# 계약 명세 4: 결과 불명 시도 뒤 확정 거절인데 DB에 행이 있다(앞 시도가 늦게 커밋, REJECT_COMMITTED에 붙는다)
 REJECT_AFTER_INFLIGHT = "REJECT_AFTER_INFLIGHT"
 K6_THRESHOLD_DISAGREES = "K6_THRESHOLD_DISAGREES"  # 4.7
-SNAPSHOT_LARGE = "SNAPSHOT_LARGE"  # 명세 6: orders 행 수가 ORDERS_WARN_ROWS를 넘음
+SNAPSHOT_LARGE = "SNAPSHOT_LARGE"  # 계약 명세 6: orders 행 수가 ORDERS_WARN_ROWS를 넘음
 
 # 가드 id → 미충족 사유(5.6)
 GUARD_REASON = {

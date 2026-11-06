@@ -1,4 +1,4 @@
-"""db.py: bundle.sql 조립, psql 명령, 출력 파싱(계약 정렬 명세 6). 네트워크·docker 없이 돈다.
+"""db.py: bundle.sql 조립, psql 명령, 출력 파싱(계약 명세 6). 네트워크·docker 없이 돈다.
 
 실제 psql 출력과 같은지는 test_sql_pg.py(-m pg)가 postgres:16으로 확인한다.
 """
@@ -210,7 +210,7 @@ def test_exec_bundle_default_target():
     assert argv == (
         "kubectl",
         "-n",
-        "papertrade",
+        "exchange",
         "exec",
         "-i",
         "postgres-0",
@@ -233,7 +233,7 @@ def test_exec_bundle_uses_run_json_db_target():
     assert res.argv == (
         "kubectl",
         "-n",
-        "papertrade",
+        "exchange",
         "exec",
         "-i",
         "pg-1",

@@ -3,7 +3,7 @@
 - run.json은 runner가 쓰고 judge는 읽기만 한다.
 - 같은 폴더의 marks.local.json(`judge mark`가 쓴다)은 run.json의 빈 칸만 채운다.
 - 위반은 모두 InputError(종료 코드 12)다.
-- extra_accounts는 발표자 user_id다(계약 정렬 명세 8). db는 psql 대상이다(명세 6).
+- extra_accounts는 발표자 user_id다(계약 명세 8). db는 psql 대상이다(계약 명세 6).
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ OPTIONAL_KEYS = (
     "replay_speed",
     "extra_accounts",
     "obs",  # inject·운영자 관측값(5.2 4단계). `judge mark --obs`와 같은 모양
-    "db",  # psql 대상 {pod, container, user, database}(명세 6). 비밀번호는 받지 않는다
+    "db",  # psql 대상 {pod, container, user, database}(계약 명세 6). 비밀번호는 받지 않는다
 )
 RUN_KEYS = frozenset(REQUIRED_KEYS + OPTIONAL_KEYS)
 K6_KEYS = frozenset({"job"})
@@ -314,7 +314,7 @@ def check_user_id(v: Any, where: str) -> str:
 
 
 def _extra_accounts(v: Any) -> tuple[str, ...]:
-    """발표자 user_id 목록(명세 8). 순서를 지키고 중복은 뺀다."""
+    """발표자 user_id 목록(계약 명세 8). 순서를 지키고 중복은 뺀다."""
     if v is None:
         return ()
     if not isinstance(v, list):
@@ -328,7 +328,7 @@ def _extra_accounts(v: Any) -> tuple[str, ...]:
 
 
 def _db(v: Any) -> DbTarget:
-    """psql 대상(명세 6). 값이 null이거나 키가 없으면 기본값이다."""
+    """psql 대상(계약 명세 6). 값이 null이거나 키가 없으면 기본값이다."""
     if v is None:
         return DbTarget()
     if not isinstance(v, dict):

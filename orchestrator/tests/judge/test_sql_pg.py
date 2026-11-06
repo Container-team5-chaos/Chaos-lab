@@ -1,4 +1,4 @@
-"""-m pg: postgres:16에 실제 서비스 스키마·seed를 넣고 bundle.sql 전체를 psql로 돌린다(계약 정렬 명세 6, 7, 10).
+"""-m pg: postgres:16에 실제 서비스 스키마·seed를 넣고 bundle.sql 전체를 psql로 돌린다(계약 명세 6, 7, 10).
 
 - 스키마·seed는 workloads/order/db/schema.sql, seed.sql을 그대로 쓴다(저장소 루트 기준으로 찾는다).
 - 이미지는 서비스(docker-compose.dev.yml)와 같은 postgres:16, 컨테이너는 pgtest-judge다. 끝나면 docker rm -f로 지운다.
