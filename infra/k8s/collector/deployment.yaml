@@ -1,0 +1,91 @@
+# 기존 infra/local/up.sh의 exchange namespace, postgres Secret, Redis를 사용함.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: collector
+  namespace: exchange
+  labels:
+    app: collector
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: collector
+  template:
+    metadata:
+      labels:
+        app: collector
+        app.kubernetes.io/name: collector
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # 시세 전용 price_history 테이블만 생성함. 주문 스키마/seed는 실행하지 않음.
+      initContainers:
+        - name: init-history
+          image: chaos-lab-collector:dev
+          imagePullPolicy: IfNotPresent
+          command: [python, main.py, init-db]
+          envFrom:
+            - secretRef:
+                name: postgres
+          env:
+            - name: PGHOST
+              value: postgres.exchange.svc.cluster.local
+            - name: REDIS_URL
+              value: redis://redis.exchange.svc.cluster.local:6379/0
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+      containers:
+        - name: collector
+          image: chaos-lab-collector:dev
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: postgres
+          env:
+            - name: PGHOST
+              value: postgres.exchange.svc.cluster.local
+            - name: REDIS_URL
+              value: redis://redis.exchange.svc.cluster.local:6379/0
+            - name: MARKET
+              value: KRW-BTC
+            - name: MAX_SOURCE_AGE_MS
+              value: "5000"
+            - name: READY_MAX_AGE_MS
+              value: "5000"
+            - name: SHUTDOWN_SECONDS
+              value: "20"
+          readinessProbe:
+            exec:
+              command: [python, healthcheck.py]
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 1
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: temporary
+          emptyDir: {}

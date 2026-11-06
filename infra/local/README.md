@@ -35,6 +35,10 @@ infra/local/down.sh    # 삭제
 
 ## 접속
 
+수집기 코드와 배포 절차는 [workloads/collector](../../workloads/collector/README.md)에 있다.
+`up.sh`로 인프라를 준비한 뒤 수집기 이미지를 kind에 로드하고 `infra/k8s/collector/`를 별도로 적용한다.
+수집기는 기존 `exchange` namespace, `postgres` Secret, PostgreSQL/Redis 서비스를 재사용한다.
+
 | 대상 | 클러스터 내부 주소 | 내 PC에서 열기 |
 | --- | --- | --- |
 | PostgreSQL | `postgres.exchange.svc.cluster.local:5432` | `kubectl --context kind-chaos-lab -n exchange port-forward svc/postgres 5432` |
