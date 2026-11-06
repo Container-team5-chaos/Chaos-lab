@@ -68,6 +68,13 @@ install_chaos_mesh() {
 
 install_data() {
   log "PostgreSQL, Redis 배포 (namespace: exchange)"
+  # 주문 서비스 스키마와 시드를 PostgreSQL 첫 기동 때 적용 (workloads/order/db)
+  log "주문 서비스 스키마 ConfigMap 생성"
+  k apply -f "$ROOT/infra/k8s/data/00-namespace.yaml"
+  k -n exchange create configmap postgres-init \
+    --from-file=01-schema.sql="$ROOT/workloads/order/db/schema.sql" \
+    --from-file=02-seed.sql="$ROOT/workloads/order/db/seed.sql" \
+    --dry-run=client -o yaml | k apply -f -
   k apply -f "$ROOT/infra/k8s/data/"
   k -n exchange rollout status statefulset/postgres --timeout=180s
   k -n exchange rollout status deployment/redis --timeout=120s
