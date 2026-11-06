@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 로컬 실험 환경을 한 번에 띄움: kind + Prometheus/Grafana + Chaos Mesh + PostgreSQL + Redis
-# 여러 번 실행해도 같은 결과
+# 여러 번 실행해도 같은 결과가 되도록 작성 (이미 있는 것은 건너뛰거나 upgrade)
 #
 # 사용법: infra/local/up.sh
 # 환경 변수: CLUSTER_NAME (기본 chaos-lab)
@@ -10,14 +10,14 @@ CLUSTER_NAME="${CLUSTER_NAME:-chaos-lab}"
 CONTEXT="kind-${CLUSTER_NAME}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# 버전 고정 — 바꿀 때는 values 파일 상단 주석도 함께 수정
+# 버전 고정: 바꿀 때는 values 파일 상단 주석도 함께 수정
 KPS_CHART_VERSION="92.21.1"
 CHAOS_MESH_CHART_VERSION="2.8.7"
 
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
-# kubectl/helm 이 다른 클러스터를 건드리지 않도록 항상 context를 명시
+# kubectl/helm 이 다른 클러스터를 건드리지 않도록 context 명시
 k() { kubectl --context "$CONTEXT" "$@"; }
 h() { helm --kube-context "$CONTEXT" "$@"; }
 
@@ -76,7 +76,7 @@ install_data() {
 verify() {
   log "설치 확인"
   local failed=0
-  # 컨트롤러와 데이터 저장소가 모두 Ready인지 확인
+  # 컨트롤러와 데이터 저장소가 Ready인지 확인
   k -n monitoring wait --for=condition=Ready pod -l app.kubernetes.io/name=prometheus --timeout=120s || failed=1
   k -n chaos-mesh wait --for=condition=Ready pod -l app.kubernetes.io/component=controller-manager --timeout=120s || failed=1
   k -n chaos-mesh rollout status daemonset/chaos-daemon --timeout=120s || failed=1
@@ -94,4 +94,25 @@ summary() {
 
   클러스터 내부 주소
     PostgreSQL  postgres.exchange.svc.cluster.local:5432   (exchange / exchange, db=exchange)
-    Redis
+    Redis       redis.exchange.svc.cluster.local:6379
+    Prometheus  kps-kube-prometheus-stack-prometheus.monitoring.svc:9090
+                k6 remote write: http://kps-kube-prometheus-stack-prometheus.monitoring.svc:9090/api/v1/write
+
+  내 PC에서 열기 (각각 다른 터미널에서)
+    kubectl --context $CONTEXT -n monitoring port-forward svc/kps-kube-prometheus-stack-prometheus 9090
+    kubectl --context $CONTEXT -n monitoring port-forward svc/kps-grafana 3000:80        # admin / admin
+    kubectl --context $CONTEXT -n chaos-mesh port-forward svc/chaos-dashboard 2333
+    kubectl --context $CONTEXT -n exchange port-forward svc/postgres 5432
+
+  삭제: infra/local/down.sh
+EOF
+}
+
+check_deps
+create_cluster
+add_repos
+install_monitoring
+install_chaos_mesh
+install_data
+verify
+summary

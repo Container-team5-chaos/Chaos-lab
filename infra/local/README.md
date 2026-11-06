@@ -4,7 +4,7 @@
 
 | 구성 요소 | Namespace | 버전 | 용도 |
 | --- | --- | --- | --- |
-| kind (control-plane 1 + worker 2) | - | 설치된 kind 기본 노드 이미지 | 로컬 클러스터 |
+| kind (control-plane 1 + worker 1) | - | 설치된 kind 기본 노드 이미지 | 로컬 클러스터 |
 | kube-prometheus-stack | `monitoring` | chart 92.21.1 | Prometheus, Grafana, kube-state-metrics |
 | Chaos Mesh | `chaos-mesh` | chart 2.8.7 | PodChaos, NetworkChaos |
 | PostgreSQL | `exchange` | `postgres:16-alpine` | 주문, 잔고, 시세 기록 |
@@ -75,5 +75,6 @@ Grafana `admin/admin`, DB `exchange/exchange`, Chaos Dashboard 인증 없음. �
 | --- | --- |
 | `Docker 데몬이 실행 중이 아닙니다` | Docker Desktop이 켜져 있는지 |
 | helm 설치가 `--wait` 시간 초과 | `kubectl --context kind-chaos-lab get pods -A`로 Pending·ImagePullBackOff Pod 확인. Docker Desktop 메모리 할당 늘리기 |
+| control-plane 컴포넌트가 계속 재시작 | CPU 부족. Docker CPU를 늘리거나 노드 수를 줄인다(현재가 줄인 버전입니다.) |
 | `chaos-daemon` 이 Ready가 안 됨 | values의 `chaosDaemon.runtime: containerd`, `socketPath: /run/containerd/containerd.sock` 확인 |
 | 처음부터 다시 | `infra/local/down.sh` 후 `infra/local/up.sh` |
