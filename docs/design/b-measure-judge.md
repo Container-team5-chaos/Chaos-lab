@@ -3,6 +3,7 @@
 - 이 문서는 Part B(측정과 판정)가 만들 k6 부하 스크립트와 판정기(judge)의 코드 설계다.
 - 근거: 주문 계약은 실제 주문 서비스 `workloads/order/`(main 6e8f38b)다. 파일 참조는 그 폴더 기준 경로다(예: `app/orders.py`). 클러스터·일정·장애·WS는 피실험 시스템 명세 `workbook-week1/reference/design-spec.md`를 따르고, `L123`은 그 명세의 줄 번호다.
 - 상태: 초안(2026-11-05). 인터페이스는 11/8 팀 합의 전이다.
+- **2026-11-06 계약 정렬**: 주문 계약의 세부(행렬, 불변식, 가드, runner 연동)는 [b-judge-contract.md](b-judge-contract.md)에 따로 둔다. 코드 주석의 "계약 명세 N"은 그 문서의 N절이다.
 - **2026-11-06 계약 정렬**: 근거를 `workloads/order`(main 6e8f38b)로 바꿨다. 옛 설계 명세의 주문 API·스키마 가정은 버렸다. 서비스 코드와 다르면 서비스 코드가 우선이다. 서비스는 체결만 저장하는 최소 버전이라 바뀔 수 있다(10절).
 - 경로 전제: 분담표는 `chaos/k6/`, `chaos/orchestrator/judge/`다. 현재 저장소는 `load/k6/`, `orchestrator/src/orchestrator/`다. 본문은 현재 경로로 쓰고, 대응은 2절에 둔다.
 
@@ -18,7 +19,7 @@
 | 응답 | status, reject_reason, price, fee | order_id, status, fill_price, amount, filled_at, replayed. 거절은 `{status:"rejected", reason}` |
 | 테이블·잔고 | fills, reconcile_runs, 수수료, cost_basis | accounts(krw), positions(volume, avg_price), orders, ticks. 거절은 저장 안 함(`db/schema.sql`) |
 | 503 | 롤백 보장 | price_unavailable·stale_price는 트랜잭션 전. not_ready는 연결 오류면 커밋 뒤일 수 있다 |
-| DB 계정 | `pt_ro` 읽기 전용, DB `papertrade` | 로컬 기본 `exchange` 계정·DB. 읽기 전용 역할 없음. 클러스터 값 미정 |
+| DB 계정 | `pt_ro` 읽기 전용, DB `papertrade` | `exchange` 계정·DB, namespace `exchange`, StatefulSet `postgres`(Pod `postgres-0`). 읽기 전용 역할 없음(`infra/k8s/data/postgres.yaml`, PR #4) |
 
 - judge 쪽: JSONL v1 → v2(4.6). K는 K_ACK·K_REJECT·K_UNKNOWN·INTERRUPTED다(옛 K_FOUND·K_404·K_4XX 삭제). 옛 PHANTOM_ACK·FALSE_NOT_FOUND·NOT_ENTERED·DUP_FILL 대신 REJECT_COMMITTED다(5.3).
 - 불변식은 옛 I2–I8 대신 cash·qty·avg·nonneg·arith·constraints·fresh다(5.4). `noConnectionReuse` 강제는 없앴다(4.4).
@@ -82,7 +83,8 @@
 | `run`, `evaluate` | PASS | FAIL | INCONCLUSIVE | 입력 오류 | judge 오류(예외 1, argparse 2) |
 | `doctor`, `precheck`(2차) | 준비됨 | — | 미비 | 입력 오류 | judge 오류 |
 
-- runner는 넷을 모두 만족할 때만 PASS로 받는다: 종료 코드 0, `verdict == "PASS"`, `run_id` 일치, `inputs.criteria_sha256`·`run_json_sha256` 일치.
+- runner는 넷을 모두 만족할 때만 PASS로 받는다: 종료 코드 0, `verdict == "PASS"`, `run_id` 일치, `inputs.criteria_sha256`·`run_json_sha256` 일치(A 구현: `orchestrator/judging.py` `accept`).
+- `criteria_sha256`은 run.json `criteria`(또는 `--criteria`)가 가리키는 **기준 파일 원본 바이트**의 sha256이다. A의 `accept`가 그 파일과 대조한다. extends까지 병합한 결과의 해시는 `criteria_resolved_sha256`에 따로 둔다.
 - **임시 제공**: `judge plan`(Job 렌더), `judge accounts`(대상 계좌 조회), `judge precheck`(2차). runner·gates·observe 담당이 정해지면 옮긴다.
 - 스텁 연결 제안: `judge.judge()` → `judge(run_json) -> Verdict`, `report.summary()` ← `report.fragment(verdict)`, `gates.check()` → `precheck()`.
 
@@ -102,7 +104,7 @@ load/k6/  orders.js ws.js lib_config.js lib_orders.js lib_record.js lib_prng.js 
 judge/    __main__.py model.py context.py criteria.py transport.py fetch.py k6log.py db.py
           classify.py invariants.py client.py verdict.py report.py sql/*.sql  promql.py ws.py limit.py(2차)
 ```
-- **ConfigMap**: kustomize `configMapGenerator`는 루트 밖 파일을 거부한다. 대신 `kubectl -n papertrade create configmap k6-scripts --from-file=load/k6/ --dry-run=client -o yaml | kubectl apply -f -`를 쓴다(최상위 일반 파일만 들어간다). namespace는 확인 필요다(10절).
+- **ConfigMap**: kustomize `configMapGenerator`는 루트 밖 파일을 거부한다. 대신 `kubectl -n exchange create configmap k6-scripts --from-file=load/k6/ --dry-run=client -o yaml | kubectl apply -f -`를 쓴다(최상위 일반 파일만 들어간다). namespace는 거래소 서비스와 같은 `exchange`다(PR #4·#5).
 - **pyproject 제안**: `dependencies = ["PyYAML>=6"]`, `[project.scripts] chaos-judge = "orchestrator.judge.__main__:main"`, pytest `pythonpath = ["src"]`, markers `pg`, `k6`, `e2e`.
 - **재구성 대비**: 상대 import만 쓰고 실행 이름을 고정한다. 재구성 PR은 import, pyproject, CI 경로, ConfigMap 명령을 함께 고친다(`git mv`만으로 끝나지 않는다).
 - ruff 기본 규칙(E4, E7, E9, F)을 지킨다. 한 줄에 필드 여러 개를 쓰면 E701/E702로 CI가 실패한다.
@@ -315,7 +317,7 @@ def classify(log: K6Log, db: DbSnapshot, cfg: IntegrityCfg, *,
              account_ids=None, extra_account_ids=None) -> ClassifyResult  # classes_of, classified.csv 유지
 def check_invariants(db: DbSnapshot, ctx: RunContext, crit: Criteria) -> list[CheckResult]  # cash … fresh
 def combine(checks: Sequence[CheckResult], guards: Sequence[CheckResult]) -> tuple[Outcome, tuple[str, ...]]
-CMD_PREFIX = ("kubectl", "-n", "papertrade")   # 테스트는 ("docker", "exec", "-i", "pgtest")
+CMD_PREFIX = ("kubectl", "-n", "exchange")   # 테스트는 ("docker", "exec", "-i", "pgtest")
 ```
 - `model.py`의 dataclass(RunContext, DbTarget, K6Log, Attempt, DbSnapshot, CheckResult, Verdict 등)는 frozen이다. 상수(`DEFAULT_RESPONSE_FIELDS`, `INVARIANTS` 등)와 Enum(`KState`, `AttemptKind`, `OrderClass`, `OkSub`, `IdemViolation`, 값은 5.3과 같다)도 여기 둔다.
 - CLI(1차): `chaos-judge {plan|accounts|doctor|fetch|collect|evaluate|run|mark|stop} --run runs/<id>/run.json [--criteria x.yaml] [--offline]`. 2차: `precheck`, `limit`.
@@ -461,7 +463,7 @@ kubectl -n <ns> exec -i <pod> [-c <container>] -- psql -X -q -v ON_ERROR_STOP=1 
 - 108·104·107은 LOAD_ABORTED·LOAD_INVALID, OOM·기록 잘림은 기록 의존 기준만 INCONCLUSIVE, psql 실패는 DB_ERROR다. DB만으로 되는 불변식은 계속 판정한다.
 
 ### 5.8 verdict와 보고서
-- 최상위 키: `schema`(`papertrade.verdict/v1`), `run_id`, `experiment`, `verdict`, `reasons`, `checks`, `guards`, `integrity{intents, log_complete, classes, subs, invariants, examples}`, `client`, `load`, `inputs{criteria_sha256, run_json_sha256, evidence_manifest_sha256, judge_version, response_fields_confirmed}`, `warnings`, `verdict_digest`, `run_info`, `generated_at`.
+- 최상위 키: `schema`(`papertrade.verdict/v1`), `run_id`, `experiment`, `verdict`, `reasons`, `checks`, `guards`, `integrity{intents, log_complete, classes, subs, invariants, examples}`, `client`, `load`, `inputs{criteria_sha256, criteria_resolved_sha256, run_json_sha256, evidence_manifest_sha256, judge_version, response_fields_confirmed}`, `warnings`, `verdict_digest`, `run_info`, `generated_at`.
 - `examples`는 클래스별 키 20개까지, 전체는 `classified.csv`다(열은 그대로이고 `k_state` 값은 5.3의 K다. `resend`는 옛 재송신 결과 대신 재전송 수(시도 수 − 1)다). Prometheus 주소는 넣지 않는다(공개 저장소).
 - 경고: ROLLBACK_REPLY_COMMITTED(after_503), K6_THRESHOLD_DISAGREES, SNAPSHOT_LARGE(orders 100만 행 초과), SAFETY_VIOLATION.
 - `report.md` 조각: 의도·ACK 수, 유실·불일치·중복·고아, 잔고 불일치와 신선도 위반 체결, 커밋 후 회수 건수, 구간 p95, INCONCLUSIVE 사유와 해소 방법, 증거 해시.
@@ -497,7 +499,7 @@ kubectl -n <ns> exec -i <pod> [-c <container>] -- psql -X -q -v ON_ERROR_STOP=1 
 **규칙**
 - `schema_version: 1`. 모르는 키는 입력 오류(12)다. 옛 키(`safety.symbol_prefix`, `safety.account_mode`, `integrity.price_max_age_ms`)는 새 키를 안내하며 거부한다.
 - `extends`는 패치 병합이다. 맵은 깊은 병합, `checks`·`guards`·`fault_effect`는 같은 id면 필드 단위 덮어쓰기, 새 id면 추가한다. 통째 교체는 `replace: true`, 끄기는 `disable: [id]`다.
-- 병합 뒤 필수 키를 검증하고(빠진 `safety.user_max`·`initial_krw`·`stale_ms`는 기본값으로 채운다) `criteria.resolved.yaml`로 저장한다. 그 해시가 `criteria_sha256`이다.
+- 병합 뒤 필수 키를 검증하고(빠진 `safety.user_max`·`initial_krw`·`stale_ms`는 기본값으로 채운다) `criteria.resolved.yaml`로 저장한다. 그 해시가 `criteria_resolved_sha256`이고, 원본 기준 파일 바이트의 해시가 `criteria_sha256`이다(1.4).
 - 모든 기준에 `required`(기본 true), `on_violation`(fail|inconclusive, 기본 fail)이 있다.
 
 ```yaml
@@ -562,7 +564,7 @@ checks: [{id: order_p95_k6, required: false}, {id: order_err_k6, required: false
 
 ## 7. 실행 위치·접근·비밀값
 
-**7.1 위치**: k6는 papertrade 단일 Pod Job이다(L628). runner·judge는 운영자 노트북이다. 우리 SA는 K8s API를 부르지 않고(L750), 장애 조작도 노트북에서 한다(L281). 클러스터 안 judge는 5432 차단(L895), Secret 마운트(L848), SA Role 부재(L995) 때문에 고르지 않는다.
+**7.1 위치**: k6는 `exchange` namespace의 단일 Pod Job이다(L628, PR #4·#5). runner·judge는 운영자 노트북이다. 우리 SA는 K8s API를 부르지 않고(L750), 장애 조작도 노트북에서 한다(L281). 클러스터 안 judge는 5432 차단(L895), Secret 마운트(L848), SA Role 부재(L995) 때문에 고르지 않는다.
 
 **7.2 Postgres 접근**
 - 선택: `kubectl exec <postgres Pod> -- psql -U <user> -d <database>`. 정책·Secret 변경이 없다. 공식 이미지(서비스와 같은 `postgres:16`)는 컨테이너 안 Unix 소켓에 trust 인증을 쓴다.
@@ -571,7 +573,7 @@ checks: [{id: order_p95_k6, required: false}, {id: order_err_k6, required: false
 - 고르지 않은 것: judge Pod → 5432(정책·Secret 변경, 연결 예산 L658 밖), port-forward(비밀번호가 노트북으로 옴), 주문 서비스 HTTP(조회 API가 없고 자기 검증 순환).
 - local trust가 꺼져 있으면 DB_ERROR로 끝낸다. 비밀번호는 어떤 경로로도 받지 않는다.
 
-**7.3 Prometheus 접근 [2차]**: direct(노트북) → relay(holder wget, Prometheus namespace ingress 허용 필요, 확인 필요: 관리자) → 자체 Prometheus(L997). 인증이 있으면 direct만 쓰고 토큰은 노트북 `.env`에만 둔다. 모든 쿼리에 `namespace="papertrade"`를 강제한다(namespace 확인 필요).
+**7.3 Prometheus 접근 [2차]**: direct(노트북) → relay(holder wget, Prometheus namespace ingress 허용 필요, 확인 필요: 관리자) → 자체 Prometheus(L997). 인증이 있으면 direct만 쓰고 토큰은 노트북 `.env`에만 둔다. 모든 쿼리에 `namespace="exchange"`를 강제한다(PR #4). 로컬 kind의 Prometheus는 `monitoring` namespace, 수집 주기 5초다(`infra/local/README.md`).
 
 **7.4 비밀값**
 - DB 비밀번호: judge는 받지 않는다(run.json `db`에 password 키가 있으면 입력 오류). 서비스가 커밋한 로컬 기본 비밀번호도 judge 코드·문서·테스트에 옮기지 않는다.
@@ -619,7 +621,7 @@ checks: [{id: order_p95_k6, required: false}, {id: order_err_k6, required: false
 | 앱 팀(주문 서비스 담당) | ① 클러스터 DB 계정·DB 이름, postgres Pod·컨테이너, local trust 유지(가능하면 읽기 전용 역할) ② 커밋 뒤 장애 훅 부재: crash-after-commit·시연용 FAULT 훅 계획 ③ 주문 조회 API 부재: `GET /orders/{client_order_id}` 계획(없어도 judge는 DB로 확정) ④ 거절 미저장 확인: 저장하게 되면 FILL_STATE·REJECT_COMMITTED 규칙을 바꾼다 ⑤ `initial_krw`: 클러스터 seed도 계좌마다 10,000,000인지 ⑥ 클러스터 `STALE_MS` ⑦ `order_duration_seconds` 0.3 버킷 ⑧ 계약 변경 알림 ⑨ 통일본에 반올림 명시: 코드는 amount를 소수 4자리 ROUND_DOWN, avg_price를 8자리 quantize(ROUND_HALF_EVEN)한다. judge는 코드를 따른다 ⑩ `filled_at` 형식 통일: 통일본 예시는 밀리초 `Z`, 코드(`isoformat()`)는 마이크로초 `+00:00`다. judge는 둘 다 읽고 응답 자릿수까지 비교한다(5.3) | ①⑤ 11/10 |
 | 수집기 담당 | ticks 기록 주체와 시점(`received_at` 시계), Redis `price:{market}` 갱신 주기. `fresh`가 기댄다 | 11/12 |
 | 팀 인프라 담당 | `mirror/k6:2.3.0` push와 이미지 도구(sh, gzip, sha256sum, wget, date, kill) 확인. k6 podSelector = `app.kubernetes.io/name: k6`(L893). 주문 서비스·postgres namespace, Service 이름·포트(앱 8000), Pod 라벨. 한계 run의 replica 고정 | 11/12 |
-| 관리자(확인 필요: 관리자) | Prometheus 주소·인증·scrape 간격·보존, papertrade ingress 허용. 팀 Role 실제 내용(L995). ephemeral-storage 쿼터. `do-not-disrupt`(k6 Pod, 11/24–11/26). 노드 시간 동기화, cgroup 버전. 노트북 S3 `results/` 쓰기. 부하 시험 시간대(L1004). 시연장 IP | 11/12 |
+| 관리자(확인 필요: 관리자) | Prometheus 주소·인증·scrape 간격·보존, exchange → monitoring ingress 허용. 팀 Role 실제 내용(L995). ephemeral-storage 쿼터. `do-not-disrupt`(k6 Pod, 11/24–11/26). 노드 시간 동기화, cgroup 버전. 노트북 S3 `results/` 쓰기. 부하 시험 시간대(L1004). 시연장 IP | 11/12 |
 
 ## 11. 위험과 확인 필요
 
