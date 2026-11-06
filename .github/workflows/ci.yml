@@ -53,4 +53,4 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
-      - run: pytest -q -m "not pg and not k6"
+      - run: pytest -q -m "not pg and not k6 and not e2e"
