@@ -1,0 +1,15 @@
+# 시나리오 형식 초안 (팀 합의 전)
+name: pod-kill
+durations:   # 초
+  warmup: 30
+  observe: 60
+  recover: 30
+faults:
+  - kind: PodChaos
+    spec:
+      action: pod-kill
+      mode: one
+      selector:
+        namespaces: [chaos-lab]
+        labelSelectors:
+          app: order
