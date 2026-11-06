@@ -1,22 +1,34 @@
-"""DB 스냅샷: bundle.sql 조립, psql 1회 실행, 출력 파싱(설계 5.4).
+"""DB 스냅샷: bundle.sql 조립, psql 1회 실행, 출력 파싱(계약 정렬 명세 6).
 
-bundle.sql 순서(설계 5.4)
-1. `\\set ids`, `\\set extra`, `\\set nick_re`. 세션 설정(UTC, 읽기 전용, 시간 제한).
-2. 지문 F1.
-3. BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY → 스냅샷 COPY 4개 → 필수 불변식 → COMMIT.
-4. 지문 F2.
-5. `\\set ON_ERROR_STOP off` → 선택 검사(arith, privileges). 선택 검사 오류가 필수 증거를 지우지 않는다.
+대상은 실제 주문 서비스 스키마(workloads/order/db/schema.sql)다. accounts·positions·orders는
+전체 행을 가져온다(시연 규모라 작다). 불변식은 이 스냅샷으로 invariants가 Python으로 계산한다.
+
+bundle.sql 순서
+1. `\\set` 변수(run_key_re, extra, schema_tables, stale_ms, tick_slack_ms). 세션 설정(UTC,
+   ISO 날짜, 기본 읽기 전용, 시간 제한).
+2. 지문 F1(트랜잭션 밖).
+3. BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY → schema → accounts → positions → orders → COMMIT.
+4. 지문 F2(트랜잭션 밖).
+5. `\\set ON_ERROR_STOP off` → ticks(선택). ticks 오류가 필수 증거를 지우지 않는다.
+   ticks 테이블이 없으면 머리줄만 있는 빈 구획을 낸다(fresh는 NOT_EVALUATED).
+
+정한 것
+- F1·F2는 트랜잭션 밖에서 잰다. REPEATABLE READ 안에서 재면 늘 같아 db_quiescent가 아무것도 못 본다.
+  F1 == F2면 그 사이 스냅샷도 같은 상태로 본다(invariants.snapshot_consistent가 대조한다).
+- schema를 트랜잭션 첫 구획으로 둔다. 열이 없어져 뒤 구획이 실패해도 드리프트 근거는 남는다.
+- run 주문은 client_order_id 전체 형식 `^k6-<run_id>-[0-9]+-[0-9]+$`로 고른다(model.run_key_re와 같다).
+  접두어만 보면 r1117-crash가 r1117-crash-2의 키까지 잡는다.
 
 출력 형식(psql stdout, raw/db/에 그대로 남긴다)
 - 구획은 `--@ <name>` 줄로 시작하고 `--@end <name>` 줄로 끝난다.
-- 본문은 COPY ... TO STDOUT (FORMAT csv, HEADER) 출력이다. 첫 줄이 열 이름이다.
-- NULL은 따옴표 없는 빈 값, 빈 문자열은 `""`다(COPY CSV 규칙).
+- 본문은 COPY ... TO STDOUT (FORMAT csv, HEADER, FORCE_QUOTE *) 출력이다. 첫 줄이 열 이름이다.
+  NULL은 따옴표 없는 빈 값, 그 밖 값은 모두 따옴표 안에 있다. 그래서 데이터 줄이 `--@`로 시작하지 않는다.
 - 출력에 `--@end` 줄이 하나라도 있으면 끝 표지가 없는 구획은 버린다(psql이 그 구획에서 멈췄다).
   끝 표지가 전혀 없으면 머리줄이 있는 구획을 받는다(가짜 API 등 단순 출력 호환).
-- 버린 구획은 DbSnapshot.sections에 없다. 그 구획을 쓰는 기준만 INCONCLUSIVE(DB_ERROR)다.
-- 모든 구획의 첫 열은 uuid·정수·고정 문자열이다. 그래서 줄 머리 `--@`가 데이터와 섞이지 않는다.
+- 버린 구획은 DbSnapshot.sections에 없고 errors에 이름이 남는다. 그 구획을 쓰는 기준만 DB_ERROR다.
 
-주입 방지: UUID는 정규 형식만, run_id는 RUN_ID_RE 전체 일치만 받는다. 그 밖은 InputError다.
+주입 방지: run_id는 RUN_ID_RE 전체 일치, extra user_id는 USER_ID_RE(context.check_user_id)만 받는다.
+그 밖은 InputError다. psql 접속 정보는 RunContext.db(DbTarget)에서 받고 비밀번호는 다루지 않는다.
 """
 
 from __future__ import annotations
@@ -24,45 +36,51 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from importlib import resources
 from typing import Any
 
-from .context import RUN_ID_RE
+from .context import RUN_ID_RE, check_user_id
 from .errors import InputError, JudgeError
 from .model import (
-    INVARIANT_SQL,
-    OPTIONAL_INVARIANT_SQL,
+    ACCOUNT_COLUMNS,
+    DEFAULT_STALE_MS,
+    FINGERPRINT_COLUMNS,
+    ORDER_COLUMNS,
+    POSITION_COLUMNS,
+    TICK_COLUMNS,
     DbAccount,
-    DbFill,
     DbOrder,
     DbPosition,
     DbSnapshot,
+    DbTarget,
+    DbTick,
+    Fingerprint,
+    SchemaItem,
     dec,
+    iso_us,
+    ts_us,
 )
 from .transport import Transports
 
 __all__ = [
-    "ACCOUNT_COLUMNS",
-    "FILL_COLUMNS",
-    "FINGERPRINT_COLUMNS",
-    "INVARIANT_COLUMNS",
-    "MARK",
+    "BUNDLE_SECTIONS",
     "END_MARK",
-    "OPTIONAL_SQL",
-    "ORDER_COLUMNS",
-    "POSITION_COLUMNS",
+    "MARK",
     "PSQL_TIMEOUT_S",
     "PsqlRun",
-    "REQUIRED_SQL",
+    "SCHEMA_COLUMNS",
+    "SCHEMA_KINDS",
+    "SCHEMA_TABLES",
+    "SQL_FILES",
+    "TICK_SLACK_MS",
     "build_bundle",
     "exec_bundle",
     "format_section",
     "load_sql",
-    "nick_regex",
     "parse_bundle_output",
     "render_snapshot",
+    "run_key_regex",
     "run_snapshot",
 ]
 
@@ -74,182 +92,58 @@ PSQL_TIMEOUT_S = 180.0
 STATEMENT_TIMEOUT = "120s"
 LOCK_TIMEOUT = "5s"
 
-REQUIRED_SQL = tuple(n for n in INVARIANT_SQL if n not in OPTIONAL_INVARIANT_SQL)
-OPTIONAL_SQL = tuple(n for n in INVARIANT_SQL if n in OPTIONAL_INVARIANT_SQL)
+# schema 구획(명세 6, 7 constraints). 열 이름 table은 SQL 예약어라 table_name으로 낸다.
+SCHEMA_COLUMNS = ("kind", "table_name", "name", "detail")
+SCHEMA_KINDS = ("table", "column", "constraint")
+# 메타데이터를 가져올 서비스 테이블(workloads/order/db/schema.sql)
+SCHEMA_TABLES = ("accounts", "positions", "orders", "ticks")
+# fresh 창의 시계 여유(명세 7: filled_at − stale_ms − 1000ms ~ filled_at + 1000ms)
+TICK_SLACK_MS = 1000
+# 패키지 sql/<name>.sql(긴 질의만 파일로 둔다)
+SQL_FILES = ("snapshot_schema", "snapshot_ticks")
 
-UUID_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+# 출력 구획 순서(bundle 순서). 이름 집합은 model.SNAPSHOT_SECTIONS와 같다.
+BUNDLE_SECTIONS = (
+    "fingerprint1",
+    "schema",
+    "accounts",
+    "positions",
+    "orders",
+    "fingerprint2",
+    "ticks",
 )
+
 _INT_RE = re.compile(r"-?[0-9]+")
 
-# 스냅샷 구획 열(이 순서로 COPY한다). k6 열은 끝에 붙인다(설계 5.4).
-ACCOUNT_COLUMNS = (
-    "id",
-    "nickname",
-    "mode",
-    "initial_cash",
-    "cash",
-    "version",
-    "created_at",
-    "created_ms",
-    "k6",
+# ---------------------------------------------------------------- 고정 SQL(명세 6)
+
+_FINGERPRINT_SQL = """SELECT (SELECT count(*) FROM orders) AS orders,
+       (SELECT max(id) FROM orders) AS max_order_id,
+       (SELECT sum(krw) FROM accounts) AS krw_sum,
+       (SELECT count(*) FROM positions) AS positions,
+       (SELECT sum(volume) FROM positions) AS volume_sum"""
+
+
+def _select(table: str, columns: Sequence[str], order_by: str) -> str:
+    return f"SELECT {', '.join(columns)}\nFROM {table}\nORDER BY {order_by}"
+
+
+# 정렬은 바이트 순(COLLATE "C")이다. 파서도 다시 정렬하지만 원본 출력도 결정적이게 둔다.
+_ACCOUNTS_SQL = _select("accounts", ACCOUNT_COLUMNS, 'user_id COLLATE "C"')
+_POSITIONS_SQL = _select(
+    "positions", POSITION_COLUMNS, 'user_id COLLATE "C", market COLLATE "C"'
 )
-ORDER_COLUMNS = (
-    "id",
-    "account_id",
-    "idem_key",
-    "body_hash",
-    "symbol",
-    "side",
-    "qty",
-    "limit_price",
-    "status",
-    "reject_reason",
-    "ref_source",
-    "ref_seq",
-    "ref_event_ts",
-    "ref_recv_ts",
-    "ref_price",
-    "ref_age_ms",
-    "received_at",
-    "received_ms",
-    "k6",
-)
-FILL_COLUMNS = (
-    "id",
-    "order_id",
-    "account_id",
-    "symbol",
-    "side",
-    "qty",
-    "price",
-    "amount",
-    "fee",
-    "fee_rate",
-    "realized_pnl",
-    "created_at",
-    "created_ms",
-    "k6",
-)
-POSITION_COLUMNS = ("account_id", "symbol", "qty", "cost_basis", "k6")
-FINGERPRINT_COLUMNS = ("orders", "fills", "version_sum")
-
-# 파싱 때 반드시 있어야 하는 열(나머지는 없으면 None)
-_ACCOUNT_REQUIRED = ("id", "nickname", "mode", "initial_cash", "cash", "version")
-_ORDER_REQUIRED = ORDER_COLUMNS[:17]  # received_ms, k6는 선택
-_FILL_REQUIRED = FILL_COLUMNS[:11]
-_POSITION_REQUIRED = POSITION_COLUMNS[:4]
-
-# 불변식 SQL 결과 열(sql/inv_<name>.sql의 SELECT 목록과 같다. -m pg 테스트가 확인한다)
-INVARIANT_COLUMNS: Mapping[str, tuple[str, ...]] = {
-    "i2": ("account_id", "field", "symbol", "value"),
-    "nulls": ("table_name", "row_key", "column_name", "problem"),
-    "constraints": ("kind", "table_name", "columns"),
-    "i4": ("problem", "account_id", "idem_key", "order_id", "n", "detail"),
-    "i5_cash": (
-        "account_id",
-        "initial_cash",
-        "cash",
-        "expect_cash",
-        "cost_basis_sum",
-        "realized_pnl_sum",
-    ),
-    "i5_qty": ("account_id", "symbol", "position_qty", "fill_net_qty"),
-    "i5_flat": ("account_id", "symbol", "qty", "cost_basis"),
-    "i6_db": (
-        "problem",
-        "order_id",
-        "account_id",
-        "symbol",
-        "fill_price",
-        "ref_price",
-        "ref_source",
-    ),
-    "i8": ("fill_id", "account_id", "mode", "symbol", "order_id"),
-    "arith": ("problem", "fill_id", "order_id", "actual", "expect"),
-    "privileges": ("role_name", "table_name", "privilege"),
-}
-
-# ---------------------------------------------------------------- 고정 SQL(설계 5.4)
-
-# 대상 계좌 ra와 k6 여부. k6: JSONL 계좌 또는 nickname 정규식이고 extra가 아니다.
-_RA_K6 = """WITH ra AS (
-    SELECT id,
-           coalesce(
-               (id = ANY (:'ids'::uuid[]) OR (mode = 'replay' AND nickname ~ :'nick_re'))
-               AND NOT (id = ANY (:'extra'::uuid[])),
-               false
-           ) AS k6
-    FROM accounts
-    WHERE id = ANY (:'ids'::uuid[])
-       OR id = ANY (:'extra'::uuid[])
-       OR (mode = 'replay' AND nickname ~ :'nick_re')
-)"""
-
-_FINGERPRINT_SQL = f"""{_RA_K6},
-ro AS (
-    SELECT id FROM orders WHERE account_id IN (SELECT id FROM ra)
-)
-SELECT (SELECT count(*) FROM ro) AS orders,
-       (SELECT count(*) FROM fills
-        WHERE account_id IN (SELECT id FROM ra) OR order_id IN (SELECT id FROM ro)) AS fills,
-       (SELECT coalesce(sum(version), 0) FROM accounts
-        WHERE id IN (SELECT id FROM ra)) AS version_sum"""
-
-_ACCOUNTS_SQL = f"""{_RA_K6}
-SELECT a.id, a.nickname, a.mode, a.initial_cash, a.cash, a.version, a.created_at,
-       floor(extract(epoch FROM a.created_at) * 1000)::bigint AS created_ms,
-       ra.k6
-FROM accounts a
-JOIN ra ON ra.id = a.id
-ORDER BY a.id"""
-
-_ORDERS_SQL = f"""{_RA_K6}
-SELECT o.id, o.account_id, o.idem_key, o.body_hash, o.symbol, o.side, o.qty, o.limit_price,
-       o.status, o.reject_reason, o.ref_source, o.ref_seq, o.ref_event_ts, o.ref_recv_ts,
-       o.ref_price, o.ref_age_ms, o.received_at,
-       floor(extract(epoch FROM o.received_at) * 1000)::bigint AS received_ms,
-       ra.k6
-FROM orders o
-JOIN ra ON ra.id = o.account_id
-ORDER BY o.account_id, o.idem_key, o.id"""
-
-_FILLS_SQL = f"""{_RA_K6},
-ro AS (
-    SELECT o.id, ra.k6 FROM orders o JOIN ra ON ra.id = o.account_id
-)
-SELECT f.id, f.order_id, f.account_id, f.symbol, f.side, f.qty, f.price, f.amount, f.fee,
-       f.fee_rate, f.realized_pnl, f.created_at,
-       floor(extract(epoch FROM f.created_at) * 1000)::bigint AS created_ms,
-       coalesce(fa.k6, ro.k6, false) AS k6
-FROM fills f
-LEFT JOIN ra fa ON fa.id = f.account_id
-LEFT JOIN ro ON ro.id = f.order_id
-WHERE fa.id IS NOT NULL OR ro.id IS NOT NULL
-ORDER BY f.id"""
-
-_POSITIONS_SQL = f"""{_RA_K6}
-SELECT p.account_id, p.symbol, p.qty, p.cost_basis, ra.k6
-FROM positions p
-JOIN ra ON ra.id = p.account_id
-ORDER BY p.account_id, p.symbol"""
-
-_SNAPSHOT_SQL = (
-    ("accounts", _ACCOUNTS_SQL),
-    ("orders", _ORDERS_SQL),
-    ("fills", _FILLS_SQL),
-    ("positions", _POSITIONS_SQL),
-)
+_ORDERS_SQL = _select("orders", ORDER_COLUMNS, "id")
 
 
 # ---------------------------------------------------------------- bundle 조립
 
 
 def load_sql(name: str) -> str:
-    """패키지의 sql/inv_<name>.sql 원문(설계 5.4 표)."""
-    if name not in INVARIANT_SQL:
-        raise JudgeError(f"모르는 불변식 SQL: {name!r}")
-    path = resources.files(__package__) / "sql" / f"inv_{name}.sql"
+    """패키지의 sql/<name>.sql 원문."""
+    if name not in SQL_FILES:
+        raise JudgeError(f"모르는 SQL 파일: {name!r}")
+    path = resources.files(__package__) / "sql" / f"{name}.sql"
     return path.read_text(encoding="utf-8")
 
 
@@ -276,7 +170,7 @@ def _embed(sql_text: str, where: str) -> str:
 def _regex_escape(s: str) -> str:
     """PostgreSQL ARE용 이스케이프. 영숫자가 아닌 글자 앞에 역슬래시를 붙인다.
 
-    ARE에서 역슬래시 + 비영숫자는 그 글자 자체다(예: `\\-`는 `-`).
+    ARE에서 역슬래시 + 비영숫자는 그 글자 자체다(예: `\\-`는 `-`). Python re도 같다.
     """
     return "".join(c if c.isascii() and c.isalnum() else "\\" + c for c in s)
 
@@ -288,22 +182,35 @@ def _check_run_id(run_id: Any) -> str:
     return run_id
 
 
-def nick_regex(run_id: str) -> str:
-    """보조 계좌 정규식 `^k6-<run_id>-[0-9]+$`(설계 5.3). run_id는 이스케이프한다."""
-    return f"^k6-{_regex_escape(_check_run_id(run_id))}-[0-9]+$"
+def run_key_regex(run_id: str) -> str:
+    """run 주문 client_order_id 정규식 `^k6-<run_id>-[0-9]+-[0-9]+$`(명세 2). run_id는 이스케이프한다."""
+    return f"^k6-{_regex_escape(_check_run_id(run_id))}-[0-9]+-[0-9]+$"
 
 
-def _uuid_list(values: Any, where: str) -> tuple[str, ...]:
+def _user_list(values: Any, where: str) -> tuple[str, ...]:
     if values is None:
         return ()
     if isinstance(values, (str, bytes)):
-        raise InputError(f"{where}는 UUID 목록이어야 한다")
-    out: set[str] = set()
-    for v in values:
-        if not isinstance(v, str) or not UUID_RE.fullmatch(v):
-            raise InputError(f"{where}: {v!r}는 UUID 형식이 아니다")
-        out.add(v.lower())
+        raise InputError(f"{where}는 user_id 목록이어야 한다")
+    out = {check_user_id(v, where) for v in values}
     return tuple(sorted(out))
+
+
+def _check_stale_ms(v: Any) -> int:
+    if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+        raise InputError(f"stale_ms {v!r}는 0 이상 정수여야 한다")
+    return v
+
+
+def _pg_text_array(values: Sequence[str]) -> str:
+    """text[] 리터럴. 원소를 큰따옴표로 감싼다(값 'NULL'이 NULL이 되지 않게).
+
+    원소는 검증된 이름(USER_ID_RE, 테이블 이름)이라 큰따옴표·역슬래시가 없다.
+    """
+    for v in values:
+        if any(c in v for c in '"\\{},'):
+            raise InputError(f"배열 원소에 쓸 수 없는 글자가 있다: {v!r}")
+    return "{" + ",".join(f'"{v}"' for v in values) + "}"
 
 
 def _psql_literal(value: str) -> str:
@@ -314,46 +221,66 @@ def _psql_literal(value: str) -> str:
 
 
 def _copy(select: str) -> str:
-    return f"COPY (\n{select}\n) TO STDOUT WITH (FORMAT csv, HEADER true);"
+    return (
+        f"COPY (\n{select}\n) TO STDOUT WITH (FORMAT csv, HEADER true, FORCE_QUOTE *);"
+    )
 
 
-def _section(name: str, select: str, *, optional: bool = False) -> list[str]:
-    """`--@ name` → COPY → `--@end name`. 선택 검사는 성공했을 때만 끝 표지를 낸다."""
-    out = [f"\\qecho '{MARK}{name}'", _copy(select)]
-    if optional:
-        out += ["\\if :ERROR", "\\else", f"\\qecho '{END_MARK}{name}'", "\\endif"]
-    else:
-        # ON_ERROR_STOP=1이라 실패하면 여기까지 오지 않는다
-        out.append(f"\\qecho '{END_MARK}{name}'")
-    return out
+def _section(name: str, select: str) -> list[str]:
+    """`--@ name` → COPY → `--@end name`. ON_ERROR_STOP=1이라 실패하면 끝 표지까지 오지 않는다."""
+    return [f"\\qecho '{MARK}{name}'", _copy(select), f"\\qecho '{END_MARK}{name}'"]
+
+
+def _ticks_section() -> list[str]:
+    """ticks(선택). ON_ERROR_STOP off 뒤에 둔다. 성공했을 때만 끝 표지를 낸다.
+
+    ticks 테이블이 없으면 머리줄만 있는 빈 구획을 낸다(수집기가 아직 없을 수 있다).
+    """
+    select = _embed(load_sql("snapshot_ticks"), "snapshot_ticks.sql")
+    return [
+        "SELECT to_regclass('ticks') IS NOT NULL AS has_ticks \\gset",
+        f"\\qecho '{MARK}ticks'",
+        "\\if :has_ticks",
+        _copy(select),
+        "\\if :ERROR",
+        "\\else",
+        f"\\qecho '{END_MARK}ticks'",
+        "\\endif",
+        "\\else",
+        f"\\qecho '{','.join(TICK_COLUMNS)}'",
+        f"\\qecho '{END_MARK}ticks'",
+        "\\endif",
+    ]
 
 
 def build_bundle(
     ctx_like: Any = None,
-    account_ids: Iterable[str] = (),
-    extra_ids: Iterable[str] | None = None,
+    *,
     run_id: str | None = None,
+    extra_ids: Iterable[str] | None = None,
+    stale_ms: int | None = None,
 ) -> str:
-    """bundle.sql 텍스트(설계 5.4). 같은 입력이면 같은 바이트다.
+    """bundle.sql 텍스트(명세 6). 같은 입력이면 같은 바이트다.
 
     ctx_like: run_id·extra_accounts 속성이 있으면 기본값으로 쓴다(RunContext 등). None 가능.
-    account_ids: JSONL account 줄의 계좌 UUID(1차 키). 정렬·중복 제거한다.
-    extra_ids: extra_accounts. None이면 ctx_like.extra_accounts.
-    run_id: None이면 ctx_like.run_id.
+    run_id: None이면 ctx_like.run_id. extra_ids: 발표자 user_id. None이면 ctx_like.extra_accounts.
+    stale_ms: ticks 범위(integrity.stale_ms). None이면 DEFAULT_STALE_MS.
     """
     rid = _check_run_id(
         run_id if run_id is not None else getattr(ctx_like, "run_id", None)
     )
     if extra_ids is None:
         extra_ids = getattr(ctx_like, "extra_accounts", ())
-    ids = _uuid_list(account_ids, "account_ids")
-    extra = _uuid_list(extra_ids, "extra_ids")
+    extra = _user_list(extra_ids, "extra_ids")
+    ms = _check_stale_ms(DEFAULT_STALE_MS if stale_ms is None else stale_ms)
 
     lines: list[str] = [
-        f"-- bundle.sql (chaos-judge db.build_bundle, 설계 5.4) run_id={rid}",
-        f"\\set ids {_psql_literal('{' + ','.join(ids) + '}')}",
-        f"\\set extra {_psql_literal('{' + ','.join(extra) + '}')}",
-        f"\\set nick_re {_psql_literal(nick_regex(rid))}",
+        f"-- bundle.sql (chaos-judge db.build_bundle, 계약 정렬 명세 6) run_id={rid}",
+        f"\\set run_key_re {_psql_literal(run_key_regex(rid))}",
+        f"\\set extra {_psql_literal(_pg_text_array(extra))}",
+        f"\\set schema_tables {_psql_literal(_pg_text_array(SCHEMA_TABLES))}",
+        f"\\set stale_ms {ms}",
+        f"\\set tick_slack_ms {TICK_SLACK_MS}",
         "SET client_encoding = 'UTF8';",
         "SET TIME ZONE 'UTC';",
         "SET DateStyle = 'ISO, YMD';",
@@ -363,17 +290,14 @@ def build_bundle(
     ]
     lines += _section("fingerprint1", _FINGERPRINT_SQL)
     lines.append("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;")
-    for name, select in _SNAPSHOT_SQL:
-        lines += _section(name, select)
-    for name in REQUIRED_SQL:
-        lines += _section(f"inv_{name}", _embed(load_sql(name), f"inv_{name}.sql"))
+    lines += _section("schema", _embed(load_sql("snapshot_schema"), "snapshot_schema"))
+    lines += _section("accounts", _ACCOUNTS_SQL)
+    lines += _section("positions", _POSITIONS_SQL)
+    lines += _section("orders", _ORDERS_SQL)
     lines.append("COMMIT;")
     lines += _section("fingerprint2", _FINGERPRINT_SQL)
     lines.append("\\set ON_ERROR_STOP off")
-    for name in OPTIONAL_SQL:
-        lines += _section(
-            f"inv_{name}", _embed(load_sql(name), f"inv_{name}.sql"), optional=True
-        )
+    lines += _ticks_section()
     return "\n".join(lines) + "\n"
 
 
@@ -394,18 +318,20 @@ def exec_bundle(
     transports: Transports | None,
     bundle: str,
     *,
+    target: DbTarget | None = None,
     timeout_s: float = PSQL_TIMEOUT_S,
 ) -> PsqlRun:
-    """bundle.sql을 psql 표준 입력으로 한 번 보낸다(설계 5.4).
+    """bundle.sql을 psql 표준 입력으로 한 번 보낸다(명세 6).
 
-    명령은 transports.psql_argv()다. 기본은
-    `kubectl -n papertrade exec -i postgres-0 -c postgres -- psql -X -q -v ON_ERROR_STOP=1
-    -U pt_ro -d papertrade -f -`. 테스트는 Transports.for_local_pg()로 docker exec를 쓴다.
+    명령은 transports.psql_argv(target)다. 기본은
+    `kubectl -n papertrade exec -i <pod> [-c <container>] -- psql -X -q -v ON_ERROR_STOP=1
+    -U <user> -d <database> -f -`. target은 RunContext.db(기본 DbTarget()).
+    테스트는 Transports.for_local_pg()로 docker exec를 쓴다.
     0이 아닌 종료 코드는 예외가 아니다(빠진 구획이 DB_ERROR가 된다).
     실행 파일이 없거나 시간이 넘으면 TransportError(judge 오류)다.
     """
     tr = transports if transports is not None else Transports()
-    argv = tuple(tr.psql_argv())
+    argv = tuple(tr.psql_argv(target))
     cp = tr.run(argv, input=bundle.encode("utf-8"), timeout=timeout_s)
     try:
         stdout = (cp.stdout or b"").decode("utf-8")
@@ -419,10 +345,11 @@ def run_snapshot(
     transports: Transports | None,
     bundle: str,
     *,
+    target: DbTarget | None = None,
     timeout_s: float = PSQL_TIMEOUT_S,
 ) -> str:
     """exec_bundle의 stdout만 돌려준다. 종료 코드·stderr가 필요하면 exec_bundle을 쓴다."""
-    return exec_bundle(transports, bundle, timeout_s=timeout_s).stdout
+    return exec_bundle(transports, bundle, target=target, timeout_s=timeout_s).stdout
 
 
 # ---------------------------------------------------------------- 출력 파싱
@@ -501,8 +428,10 @@ def _scan(text: str) -> Iterable[tuple[str, Any]]:
         yield "row", fields
 
 
-def _split_sections(text: str) -> dict[str, list[list[Field]]]:
-    """완결된 구획만 이름 → 레코드(머리줄 포함)."""
+def _split_sections(
+    text: str,
+) -> tuple[dict[str, list[list[Field]]], tuple[str, ...]]:
+    """(완결된 구획 이름 → 레코드(머리줄 포함), 버린 구획 설명)."""
     sections: dict[str, list[list[Field]]] = {}
     closed: set[str] = set()
     broken: set[str] = set()
@@ -528,11 +457,18 @@ def _split_sections(text: str) -> dict[str, list[list[Field]]]:
             sections[current].append(val)
         elif kind == "broken" and current is not None:
             broken.add(current)
-    return {
-        name: recs
-        for name, recs in sections.items()
-        if recs and name not in broken and (name in closed or not has_end)
-    }
+    kept: dict[str, list[list[Field]]] = {}
+    dropped: list[str] = []
+    for name, recs in sections.items():
+        if name in broken:
+            dropped.append(f"구획 '{name}': 출력이 따옴표 안에서 끊겼다")
+        elif has_end and name not in closed:
+            dropped.append(f"구획 '{name}': 끝 표지가 없다(psql 오류로 멈춤)")
+        elif not recs:
+            dropped.append(f"구획 '{name}': 머리줄이 없다")
+        else:
+            kept[name] = recs
+    return kept, tuple(dropped)
 
 
 def _table(name: str, records: list[list[Field]]) -> tuple[tuple[str, ...], list[dict]]:
@@ -575,19 +511,12 @@ def _req_int(v: Field, where: str) -> int:
 
 def _dec(v: Field, where: str) -> Decimal | None:
     try:
-        return dec(v)
+        out = dec(v)
     except (TypeError, ValueError) as e:
         raise InputError(f"{where}: {e}") from e
-
-
-def _bool(v: Field, where: str) -> bool:
-    if v is None:
-        return False
-    if v in ("t", "true"):
-        return True
-    if v in ("f", "false"):
-        return False
-    raise InputError(f"{where}: 참거짓 값이 아니다({v!r})")
+    if out is not None and not out.is_finite():
+        raise InputError(f"{where}: 유한한 수가 아니다({v!r})")
+    return out
 
 
 def _req_str(v: Field, where: str) -> str:
@@ -596,146 +525,130 @@ def _req_str(v: Field, where: str) -> str:
     return v
 
 
-def _ts_ms(raw: Field, where: str) -> int | None:
-    """timestamptz 텍스트 → epoch ms. *_ms 열이 없을 때만 쓴다."""
-    if raw is None:
-        return None
+def _ts(v: Field, where: str) -> int | None:
     try:
-        t = datetime.fromisoformat(raw)
+        return ts_us(v)
     except ValueError as e:
-        raise InputError(f"{where}: 시각 형식이 아니다({raw!r})") from e
-    if t.tzinfo is None:
-        raise InputError(f"{where}: 시간대가 없다({raw!r})")
-    return (t - _EPOCH) // timedelta(milliseconds=1)
-
-
-_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-
-
-def _ms_or_ts(
-    row: Mapping[str, Field], ms_col: str, ts_col: str, where: str
-) -> int | None:
-    if ms_col in row:
-        return _int(row[ms_col], f"{where}.{ms_col}")
-    return _ts_ms(row.get(ts_col), f"{where}.{ts_col}")
+        raise InputError(f"{where}: {e}") from e
 
 
 def _accounts(rows: list[dict], header: Sequence[str]) -> tuple[DbAccount, ...]:
-    _need("accounts", header, _ACCOUNT_REQUIRED)
+    _need("accounts", header, ACCOUNT_COLUMNS)
     out = []
     for k, r in enumerate(rows, start=1):
         w = f"accounts {k}행"
         out.append(
             DbAccount(
-                id=_req_str(r["id"], f"{w}.id"),
-                nickname=r["nickname"],
-                mode=r["mode"],
-                initial_cash=_int(r["initial_cash"], f"{w}.initial_cash"),
-                cash=_int(r["cash"], f"{w}.cash"),
-                version=_int(r["version"], f"{w}.version"),
-                k6=_bool(r.get("k6"), f"{w}.k6"),
-                created_ms=_ms_or_ts(r, "created_ms", "created_at", w),
+                user_id=_req_str(r["user_id"], f"{w}.user_id"),
+                krw=_dec(r["krw"], f"{w}.krw"),
             )
         )
-    return tuple(sorted(out, key=lambda a: a.id))
-
-
-def _orders(rows: list[dict], header: Sequence[str]) -> tuple[DbOrder, ...]:
-    _need("orders", header, _ORDER_REQUIRED)
-    out = []
-    for k, r in enumerate(rows, start=1):
-        w = f"orders {k}행"
-        out.append(
-            DbOrder(
-                id=_req_str(r["id"], f"{w}.id"),
-                account_id=_req_str(r["account_id"], f"{w}.account_id"),
-                idem_key=r["idem_key"] or "",  # NULL 키는 ""(inv_nulls가 위반으로 낸다)
-                body_hash=r["body_hash"],
-                symbol=r["symbol"],
-                side=r["side"],
-                qty=_dec(r["qty"], f"{w}.qty"),
-                limit_price=_dec(r["limit_price"], f"{w}.limit_price"),
-                status=r["status"],
-                reject_reason=r["reject_reason"],
-                ref_source=r["ref_source"],
-                ref_seq=r["ref_seq"],
-                ref_event_ts=_int(r["ref_event_ts"], f"{w}.ref_event_ts"),
-                ref_recv_ts=_int(r["ref_recv_ts"], f"{w}.ref_recv_ts"),
-                ref_price=_dec(r["ref_price"], f"{w}.ref_price"),
-                ref_age_ms=_int(r["ref_age_ms"], f"{w}.ref_age_ms"),
-                received_at=r["received_at"],
-                received_ms=_ms_or_ts(r, "received_ms", "received_at", w),
-            )
-        )
-    return tuple(sorted(out, key=lambda o: (o.account_id, o.idem_key, o.id)))
-
-
-def _fills(rows: list[dict], header: Sequence[str]) -> tuple[DbFill, ...]:
-    _need("fills", header, _FILL_REQUIRED)
-    out = []
-    for k, r in enumerate(rows, start=1):
-        w = f"fills {k}행"
-        out.append(
-            DbFill(
-                id=_req_int(r["id"], f"{w}.id"),
-                order_id=r["order_id"] or "",  # NULL은 ""(inv_nulls가 위반으로 낸다)
-                account_id=r["account_id"],
-                symbol=r["symbol"],
-                side=r["side"],
-                qty=_dec(r["qty"], f"{w}.qty"),
-                price=_dec(r["price"], f"{w}.price"),
-                amount=_int(r["amount"], f"{w}.amount"),
-                fee=_int(r["fee"], f"{w}.fee"),
-                fee_rate=_dec(r["fee_rate"], f"{w}.fee_rate"),
-                realized_pnl=_int(r["realized_pnl"], f"{w}.realized_pnl"),
-                created_at=r.get("created_at"),
-                created_ms=_ms_or_ts(r, "created_ms", "created_at", w),
-            )
-        )
-    return tuple(sorted(out, key=lambda f: f.id))
+    return tuple(sorted(out, key=lambda a: a.user_id))
 
 
 def _positions(rows: list[dict], header: Sequence[str]) -> tuple[DbPosition, ...]:
-    _need("positions", header, _POSITION_REQUIRED)
+    _need("positions", header, POSITION_COLUMNS)
     out = []
     for k, r in enumerate(rows, start=1):
         w = f"positions {k}행"
         out.append(
             DbPosition(
-                account_id=_req_str(r["account_id"], f"{w}.account_id"),
-                symbol=_req_str(r["symbol"], f"{w}.symbol"),
-                qty=_dec(r["qty"], f"{w}.qty"),
-                cost_basis=_int(r["cost_basis"], f"{w}.cost_basis"),
+                user_id=_req_str(r["user_id"], f"{w}.user_id"),
+                market=_req_str(r["market"], f"{w}.market"),
+                volume=_dec(r["volume"], f"{w}.volume"),
+                avg_price=_dec(r["avg_price"], f"{w}.avg_price"),
             )
         )
-    return tuple(sorted(out, key=lambda p: (p.account_id, p.symbol)))
+    return tuple(sorted(out, key=lambda p: (p.user_id, p.market)))
 
 
-def _fingerprint(
-    name: str, rows: list[dict], header: Sequence[str]
-) -> tuple[int, int, int]:
+def _orders(rows: list[dict], header: Sequence[str]) -> tuple[DbOrder, ...]:
+    _need("orders", header, ORDER_COLUMNS)
+    out = []
+    for k, r in enumerate(rows, start=1):
+        w = f"orders {k}행"
+        out.append(
+            DbOrder(
+                id=_req_int(r["id"], f"{w}.id"),
+                # 스키마가 NOT NULL이다. NULL이면 ""로 두고 constraints가 드리프트로 본다
+                client_order_id=r["client_order_id"] or "",
+                user_id=r["user_id"] or "",
+                market=r["market"],
+                side=r["side"],
+                volume=_dec(r["volume"], f"{w}.volume"),
+                status=r["status"],
+                fill_price=_dec(r["fill_price"], f"{w}.fill_price"),
+                amount=_dec(r["amount"], f"{w}.amount"),
+                created_us=_ts(r["created_at"], f"{w}.created_at"),
+                filled_us=_ts(r["filled_at"], f"{w}.filled_at"),
+            )
+        )
+    return tuple(sorted(out, key=lambda o: o.id))
+
+
+def _ticks(rows: list[dict], header: Sequence[str]) -> tuple[DbTick, ...]:
+    _need("ticks", header, TICK_COLUMNS)
+    out = []
+    for k, r in enumerate(rows, start=1):
+        w = f"ticks {k}행"
+        out.append(
+            DbTick(
+                market=_req_str(r["market"], f"{w}.market"),
+                price=_dec(r["price"], f"{w}.price"),
+                received_us=_ts(r["received_at"], f"{w}.received_at"),
+            )
+        )
+    return tuple(sorted(out, key=lambda t: (t.market, t.received_us or 0)))
+
+
+def _schema(rows: list[dict], header: Sequence[str]) -> tuple[SchemaItem, ...]:
+    """schema 구획. 행 순서는 출력 순서 그대로다(SQL이 kind, table, name 순으로 낸다)."""
+    _need("schema", header, SCHEMA_COLUMNS)
+    out = []
+    for k, r in enumerate(rows, start=1):
+        w = f"schema {k}행"
+        kind = _req_str(r["kind"], f"{w}.kind")
+        if kind not in SCHEMA_KINDS:
+            raise InputError(
+                f"{w}.kind: {kind!r}는 {list(SCHEMA_KINDS)} 중 하나가 아니다"
+            )
+        out.append(
+            SchemaItem(
+                kind=kind,
+                table=_req_str(r["table_name"], f"{w}.table_name"),
+                name=_req_str(r["name"], f"{w}.name"),
+                detail=r["detail"],
+            )
+        )
+    return tuple(out)
+
+
+def _fingerprint(name: str, rows: list[dict], header: Sequence[str]) -> Fingerprint:
     _need(name, header, FINGERPRINT_COLUMNS)
     if len(rows) != 1:
         raise InputError(f"구획 '{name}': 행이 1개여야 한다(받음 {len(rows)}개)")
     r = rows[0]
-    return (
-        _req_int(r["orders"], f"{name}.orders"),
-        _req_int(r["fills"], f"{name}.fills"),
-        _req_int(r["version_sum"], f"{name}.version_sum"),
+    return Fingerprint(
+        orders=_req_int(r["orders"], f"{name}.orders"),
+        max_order_id=_int(r["max_order_id"], f"{name}.max_order_id"),
+        krw_sum=_dec(r["krw_sum"], f"{name}.krw_sum"),
+        positions=_req_int(r["positions"], f"{name}.positions"),
+        volume_sum=_dec(r["volume_sum"], f"{name}.volume_sum"),
     )
 
 
 def parse_bundle_output(text: str) -> DbSnapshot:
-    """psql 출력(--@ 구획 + COPY CSV)을 DbSnapshot으로 바꾼다(설계 5.4).
+    """psql 출력(--@ 구획 + COPY CSV)을 DbSnapshot으로 바꾼다(명세 6).
 
-    - numeric은 Decimal(문자열 그대로), bigint·int는 int, NULL은 None.
-    - 빠지거나 끝나지 않은 구획은 sections에 없다. 그 표는 빈 tuple, 지문은 None이다.
-    - 불변식 구획(inv_<name>)의 위반 행은 invariant_rows[<name>]에 열 이름 → 텍스트(NULL은 None)로
-      둔다. 위반이 없는 구획은 sections에만 있다(DbSnapshot.invariant_violations가 빈 tuple을 준다).
-    - 행 순서를 정렬해 같은 증거면 같은 결과다.
-    - 형식이 깨졌으면(열 수 불일치, 중복 구획 등) InputError다.
+    - numeric은 Decimal(문자열 그대로, 자릿수 유지), bigint는 int, timestamptz는 epoch µs, NULL은 None.
+    - 빠지거나 끝나지 않은 구획은 sections에 없고 errors에 남는다. 그 표는 빈 tuple, 지문은 None이다.
+    - 불변식 구획(inv_<id>)이 있으면 행을 invariant_rows[<id>]에 열 이름 → 텍스트로 둔다.
+      지금 bundle은 이 구획을 내지 않는다(불변식은 invariants가 Python으로 계산한다).
+    - 행 순서를 정렬해 같은 증거면 같은 결과다(accounts·positions는 키, orders는 id, ticks는 시각).
+    - 형식이 깨졌으면(열 수 불일치, 중복 구획, 필수 열 없음 등) InputError다.
     """
-    parsed = {name: _table(name, recs) for name, recs in _split_sections(text).items()}
+    split, dropped = _split_sections(text)
+    parsed = {name: _table(name, recs) for name, recs in split.items()}
 
     def take(name: str, conv: Any, empty: Any) -> Any:
         if name not in parsed:
@@ -743,7 +656,7 @@ def parse_bundle_output(text: str) -> DbSnapshot:
         header, rows = parsed[name]
         return conv(rows, header)
 
-    fps: dict[str, tuple[int, int, int] | None] = {}
+    fps: dict[str, Fingerprint | None] = {}
     for name in ("fingerprint1", "fingerprint2"):
         if name in parsed:
             header, rows = parsed[name]
@@ -759,20 +672,36 @@ def parse_bundle_output(text: str) -> DbSnapshot:
 
     return DbSnapshot(
         accounts=take("accounts", _accounts, ()),
-        orders=take("orders", _orders, ()),
-        fills=take("fills", _fills, ()),
         positions=take("positions", _positions, ()),
+        orders=take("orders", _orders, ()),
+        ticks=take("ticks", _ticks, ()),
+        schema=take("schema", _schema, ()),
         fingerprint1=fps["fingerprint1"],
         fingerprint2=fps["fingerprint2"],
         sections=frozenset(parsed),
         invariant_rows=inv_rows,
+        errors=dropped,
     )
 
 
-# ---------------------------------------------------------------- 출력 만들기(테스트·가짜 API 참고용)
+# ---------------------------------------------------------------- 출력 만들기(테스트·픽스처용)
+
+
+def _pg_ts(us: int | None) -> str | None:
+    """epoch µs → psql 출력 모양("2026-11-06 01:02:03.1234+00", UTC, 끝 0은 뺀다)."""
+    if us is None:
+        return None
+    s = iso_us(us, sep=" ")
+    if not s.endswith("+00:00"):
+        raise JudgeError(f"UTC가 아닌 시각: {s}")
+    body = s[: -len("+00:00")]
+    if "." in body:
+        body = body.rstrip("0").rstrip(".")
+    return body + "+00"
 
 
 def _csv_field(v: Any) -> str:
+    """FORCE_QUOTE * 모양. None → 빈 값(NULL), 그 밖 → 따옴표 안."""
     if v is None:
         return ""
     if isinstance(v, bool):
@@ -781,142 +710,85 @@ def _csv_field(v: Any) -> str:
         s = format(v, "f")
     else:
         s = str(v)
-    if (
-        s == ""
-        or s != s.strip()
-        or s.startswith("--@")
-        or any(c in s for c in ',"\r\n')
-    ):
-        return '"' + s.replace('"', '""') + '"'
-    return s
+    return '"' + s.replace('"', '""') + '"'
 
 
 def format_section(
     name: str, header: Sequence[str], rows: Iterable[Sequence[Any]]
 ) -> str:
     """구획 하나를 psql 출력과 같은 모양으로 쓴다(None → NULL, "" → `""`)."""
-    lines = [f"{MARK}{name}", ",".join(_csv_field(h) for h in header)]
+    lines = [f"{MARK}{name}", ",".join(header)]
     lines += [",".join(_csv_field(v) for v in r) for r in rows]
     lines.append(f"{END_MARK}{name}")
     return "\n".join(lines) + "\n"
 
 
+def _fp_row(fp: Fingerprint) -> tuple[Any, ...]:
+    return (fp.orders, fp.max_order_id, fp.krw_sum, fp.positions, fp.volume_sum)
+
+
+def _inv_section(name: str, rows: Sequence[Mapping[str, Field]]) -> str:
+    header = tuple(rows[0].keys()) if rows else ("subject",)
+    return format_section(
+        f"inv_{name}", header, [[r.get(c) for c in header] for r in rows]
+    )
+
+
 def render_snapshot(db: DbSnapshot) -> str:
     """DbSnapshot을 bundle 출력 모양으로 되돌린다. parse_bundle_output의 역(구획 순서는 bundle 순서).
 
-    k6 열은 계좌의 k6 값으로 채운다. invariant_rows의 열은 INVARIANT_COLUMNS를 따른다.
+    db.sections에 있는 구획만 쓴다. inv_<id> 구획은 orders 뒤에 이름 순으로 쓴다(열은 행의 키).
     """
-    k6 = {a.id: a.k6 for a in db.accounts}
-    order_acct = {o.id: o.account_id for o in db.orders}
     out: list[str] = []
+    secs = db.sections
 
-    def fp(name: str, v: tuple[int, int, int] | None) -> None:
-        if name in db.sections and v is not None:
-            out.append(format_section(name, FINGERPRINT_COLUMNS, [v]))
+    def fp(name: str, v: Fingerprint | None) -> None:
+        if name in secs and v is not None:
+            out.append(format_section(name, FINGERPRINT_COLUMNS, [_fp_row(v)]))
 
-    fp("fingerprint1", db.fingerprint1)
-    tables: list[tuple[str, tuple[str, ...], list[tuple[Any, ...]]]] = [
-        (
-            "accounts",
-            ACCOUNT_COLUMNS,
-            [
-                (
-                    a.id,
-                    a.nickname,
-                    a.mode,
-                    a.initial_cash,
-                    a.cash,
-                    a.version,
-                    None,
-                    a.created_ms,
-                    a.k6,
-                )
-                for a in db.accounts
-            ],
+    tables: dict[str, tuple[tuple[str, ...], list[tuple[Any, ...]]]] = {
+        "schema": (
+            SCHEMA_COLUMNS,
+            [(s.kind, s.table, s.name, s.detail) for s in db.schema],
         ),
-        (
-            "orders",
+        "accounts": (ACCOUNT_COLUMNS, [(a.user_id, a.krw) for a in db.accounts]),
+        "positions": (
+            POSITION_COLUMNS,
+            [(p.user_id, p.market, p.volume, p.avg_price) for p in db.positions],
+        ),
+        "orders": (
             ORDER_COLUMNS,
             [
                 (
                     o.id,
-                    o.account_id,
-                    o.idem_key,
-                    o.body_hash,
-                    o.symbol,
+                    o.client_order_id,
+                    o.user_id,
+                    o.market,
                     o.side,
-                    o.qty,
-                    o.limit_price,
+                    o.volume,
                     o.status,
-                    o.reject_reason,
-                    o.ref_source,
-                    o.ref_seq,
-                    o.ref_event_ts,
-                    o.ref_recv_ts,
-                    o.ref_price,
-                    o.ref_age_ms,
-                    o.received_at,
-                    o.received_ms,
-                    k6.get(o.account_id, False),
+                    o.fill_price,
+                    o.amount,
+                    _pg_ts(o.created_us),
+                    _pg_ts(o.filled_us),
                 )
                 for o in db.orders
             ],
         ),
-        (
-            "fills",
-            FILL_COLUMNS,
-            [
-                (
-                    f.id,
-                    f.order_id,
-                    f.account_id,
-                    f.symbol,
-                    f.side,
-                    f.qty,
-                    f.price,
-                    f.amount,
-                    f.fee,
-                    f.fee_rate,
-                    f.realized_pnl,
-                    f.created_at,
-                    f.created_ms,
-                    k6.get(
-                        f.account_id or "",
-                        k6.get(order_acct.get(f.order_id, ""), False),
-                    ),
-                )
-                for f in db.fills
-            ],
+        "ticks": (
+            TICK_COLUMNS,
+            [(t.market, t.price, _pg_ts(t.received_us)) for t in db.ticks],
         ),
-        (
-            "positions",
-            POSITION_COLUMNS,
-            [
-                (
-                    p.account_id,
-                    p.symbol,
-                    p.qty,
-                    p.cost_basis,
-                    k6.get(p.account_id, False),
-                )
-                for p in db.positions
-            ],
-        ),
-    ]
-    for name, header, rows in tables:
-        if name in db.sections:
+    }
+    for name in BUNDLE_SECTIONS:
+        if name in ("fingerprint1", "fingerprint2"):
+            fp(name, db.fingerprint1 if name == "fingerprint1" else db.fingerprint2)
+            continue
+        if name in secs:
+            header, rows = tables[name]
             out.append(format_section(name, header, rows))
-    for name in REQUIRED_SQL:
-        out.append(_render_inv(db, name))
-    fp("fingerprint2", db.fingerprint2)
-    for name in OPTIONAL_SQL:
-        out.append(_render_inv(db, name))
+        if name == "orders":
+            for sec in sorted(s for s in secs if s.startswith("inv_")):
+                inv = sec[len("inv_") :]
+                out.append(_inv_section(inv, db.invariant_rows.get(inv, ())))
     return "".join(out)
-
-
-def _render_inv(db: DbSnapshot, name: str) -> str:
-    rows = db.invariant_violations(name)
-    if rows is None:
-        return ""
-    cols = INVARIANT_COLUMNS[name]
-    return format_section(f"inv_{name}", cols, [[r.get(c) for c in cols] for r in rows])

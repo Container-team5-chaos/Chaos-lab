@@ -1,119 +1,793 @@
-"""잔고 불변식 판정(설계 5.4). SQL 구획 결과와 I7(Python)을 CheckResult로 바꾼다.
+"""잔고 불변식(계약 정렬 명세 7). DB 스냅샷(전체 행)으로 Python이 계산해 InvariantResult를 낸다.
 
-결과 규칙(verdict.combine과 맞춘다)
-- 구획(sql/inv_<name>.sql)마다 CheckResult 하나. id는 `inv_<name>`, I7은 `i7`. kind는 integrity.
-- outcome은 위반 행 수를 기준의 op·value로 비교한 그대로다. on_violation 적용은 combine 몫이다.
-- 구획이 없으면 INCONCLUSIVE(DB_ERROR). 다른 구획은 그대로 판정한다.
-- FAIL 사유: constraints는 CONSTRAINT_MISSING, 나머지는 비운다(combine이 INTEGRITY_VIOLATION을 붙인다).
-- required·on_violation·op·value는 그 구획을 sql:(I7은 check: i7)로 가리키는 기준 항목에서 온다.
-  여러 항목이 가리키면 required는 하나라도 true, on_violation은 required 항목 중 하나라도 fail이면 fail.
-  기준(Criteria)을 줬는데 아무 항목도 가리키지 않으면 required=false(보고만 한다).
-  기준 없이 부르면 선택 검사(arith, privileges)만 required=false다.
-- value는 위반 행 수, detail.examples는 위반 행 20개까지(정렬).
-- invariant_counts()는 이름(i2, ..., i7) → 위반 수(평가 못 하면 None)다.
-  verdict.json integrity.invariants와 verdict.evaluate_count_check의 sql 건수에 그대로 쓴다.
+불변식(모두 status='filled' 주문만 센다)
+- cash: 모든 계좌 krw + Σ(bid amount) − Σ(ask amount) = initial_krw. 계좌 없는 주문도 위반이다.
+- qty: 모든 (user, market) ∈ positions ∪ orders: positions.volume(없으면 0) = Σ(bid volume) − Σ(ask volume).
+- avg: 모든 (user, market): 그 주문을 id 순으로 서비스 공식대로 재생한 avg_price = positions.avg_price.
+  공식(workloads/order/app/orders.py): bid는 ((held·avg + v·price) / (held + v)).quantize(1e-8),
+  ask는 avg를 그대로 둔다(volume이 0이 돼도). 기본 context(28자리, ROUND_HALF_EVEN)로 똑같이 계산한다.
+- nonneg: krw ≥ 0, volume ≥ 0, avg_price ≥ 0.
+- arith: run 주문(+extra 계좌 주문): amount = ROUND_DOWN(fill_price × volume, 4)(기본 context).
+- constraints: schema 구획이 기대 스키마(EXPECTED_*)를 담는다. 다르면 위반 수 대신 None + SCHEMA_DRIFT.
+- fresh(선택): run 주문(+extra)마다 같은 market의 tick 중 price = fill_price이고
+  received_at ∈ [filled_at − stale_ms − 1s, filled_at + 1s]인 것이 있다. 볼 tick이 없으면 NOT_EVALUATED.
 
-I7(신선도 위반 체결, 설계 5.4)
-- FILLED이고 ref_age_ms × speed(received_ms) > price_max_age_ms면 위반이다(곱으로 비교해 나눗셈 오차가 없다).
-  ref_age_ms NULL도 위반이다. REPLAY 아닌 종목은 배속 1이다.
-- 배속 타임라인은 speed_timeline 인자(Pod 관측) → ctx.replay_speed(run.json + marks.local.json) 순이다.
-- 전환 시각 ±15s(우리 설정값, 양끝 포함) 안이면 앞뒤 배속 중 느린 쪽(느슨한 상한)을 쓴다.
-- 첫 점보다 이른 주문, 타임라인이 없을 때는 판정하지 못한다 → INCONCLUSIVE(NO_SPEED_TIMELINE).
-  received_ms가 NULL이면 타임라인의 모든 배속에서 같은 결론일 때만 판정한다.
-- 위반이 하나라도 있으면 판정 못 한 주문이 있어도 FAIL이다.
-- 보고: DB 시계 나이(received_ms − ref_event_ts) 최댓값, 앱 상한 추정(FILLED 최대 나이,
-  STALE_PRICE 거절 최소 나이, 배속 1 기준). judge 상한과 어긋나면 detail.warnings에 APP_MAX_AGE_DIFFERS.
-  체결 순간 피드 생존(hb 나이)은 저장되지 않아 detail.feed_alive = "unverifiable"이다.
+정한 것
+- 계산 위치는 모두 Python이다. bundle이 accounts·positions·orders 전체 행과 schema 메타를 가져온다.
+  SQL 구획(inv_<id>)은 쓰지 않는다. 같은 스냅샷 하나로 계산하니 SQL·Python 두 결과가 갈릴 일이 없다.
+- cash·qty·avg·nonneg는 모든 계좌다(seed 기준 전체 보존식). arith·fresh는 run 주문(+extra)이다.
+  run 주문은 client_order_id 전체 형식(model.is_run_key)으로 고른다. ctx가 없으면 모든 filled 주문이다.
+- NULL은 위반으로 센다(스키마가 NOT NULL이라 정상이면 없다). fresh만 체결 열 NULL을 건너뛴다(FILL_STATE 몫).
+- 필요한 구획이 없으면 violations None + DB_ERROR. 다른 불변식은 그대로 판정한다.
+- 스냅샷 자기 검사(snapshot_consistent): F1 == F2(정지)인데 파싱한 행의 지문이 F1과 다르면
+  행 기반 불변식(constraints 밖 전부)은 None + JUDGE_SELF_CHECK다(파싱이 행을 잃었다).
+- 서비스는 Redis 가격(소수 자릿수 제한 없음)으로 계산하고 DB에는 fill_price를 8자리로 반올림해 넣는다.
+  가격 소수가 8자리를 넘으면 avg·arith가 어긋날 수 있다(KRW-BTC 가격은 정수라 지금은 해당 없음).
+
+결과 규칙(verdict.evaluate_count_check와 맞춘다)
+- check_invariants는 InvariantResult를 INVARIANT_IDS 순서로 낸다. examples는 subject 순 EXAMPLES_MAX개.
+- item_results는 기준 항목(kind integrity, sql: 또는 check:)마다 CheckResult 하나를 낸다. 위반 수 합을
+  op·value로 비교한다. 평가 못 한 불변식이 있으면 아는 건수로 정해질 때만 정하고(예: '== 0'인데 이미 1건),
+  아니면 INCONCLUSIVE이고 사유는 그 불변식의 사유(DB_ERROR, SCHEMA_DRIFT, NOT_EVALUATED 등)다.
+- invariant_counts는 id → 위반 수(평가 못 하면 None)다. verdict.json integrity.invariants에 쓴다.
+- run_key_counts는 judge_self_check(분류기 대조)용 run 키 주문 수다.
 """
 
 from __future__ import annotations
 
-import json
-import operator
-from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from decimal import Decimal
+import bisect
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from decimal import ROUND_DOWN, ROUND_HALF_EVEN, Context, Decimal, localcontext
 from typing import Any
 
 from . import reasons as R
 from .criteria import integrity_cfg
-from .errors import InputError
+from .db import TICK_SLACK_MS
 from .model import (
-    INVARIANT_SQL,
-    OPTIONAL_INVARIANT_SQL,
+    DEFAULT_STALE_MS,
+    EXAMPLES_MAX,
+    INTEGRITY_CHECKS,
+    INVARIANT_IDS,
+    SIDE_ASK,
+    SIDE_BID,
+    STATUS_FILLED,
     CheckResult,
     Criteria,
     DbOrder,
     DbSnapshot,
     IntegrityCfg,
+    InvariantResult,
+    InvariantViolation,
     Outcome,
-    SpeedPoint,
-    dec,
+    canonical_json,
+    compute_fingerprint,
+    is_run_key,
+    iso_us,
+    to_jsonable,
 )
+from .verdict import evaluate_count_check
 
 __all__ = [
-    "ADVISORY_PROBLEMS",
-    "EXAMPLES_MAX",
-    "I7_ID",
-    "I7Eval",
-    "SPEED_SLACK_MS",
+    "EXPECTED_COLUMNS",
+    "EXPECTED_CONSTRAINTS",
+    "EXPECTED_TABLES",
+    "ROW_BASED",
+    "Replay",
+    "Scope",
+    "check_arith",
+    "check_avg",
+    "check_cash",
+    "check_constraints",
+    "check_fresh",
     "check_invariants",
-    "evaluate_i7",
-    "i4_counts",
+    "check_nonneg",
+    "check_qty",
     "invariant_counts",
     "item_results",
-    "speed_candidates",
+    "replay_position",
+    "run_key_counts",
+    "scope_of",
+    "snapshot_consistent",
 ]
 
 KIND = "integrity"
-I7_ID = "i7"
-SPEED_SLACK_MS = 15_000  # 배속 전환 전후 느슨한 구간(우리 설정값, 설계 5.4)
-EXAMPLES_MAX = 20  # 설계 5.8 examples
-REPLAY_PREFIX = "REPLAY:"
-STALE_REASON = "STALE_PRICE"
-FILLED = "FILLED"
-REJECTED = "REJECTED"
+SOURCE = "python"
 
-# 판정에 넣지 않고 보고만 하는 problem 값(설계 5.4 표: i6_db는 앞 둘만 required)
-ADVISORY_PROBLEMS: Mapping[str, frozenset[str]] = {"i6_db": frozenset({"ref_source"})}
+# 서비스 계산 context(orders.place_order는 기본 context를 쓴다: 28자리, ROUND_HALF_EVEN)
+SERVICE_CONTEXT = Context(prec=28, rounding=ROUND_HALF_EVEN)
+# 합계·차이용. 자릿수가 모자라 반올림되는 일이 없게 넉넉히 둔다(우리 설정값)
+EXACT_CONTEXT = Context(prec=200, rounding=ROUND_HALF_EVEN)
+Q_AMOUNT = Decimal("0.0001")  # amount = (price × volume).quantize(0.0001, ROUND_DOWN)
+Q_AVG = Decimal("0.00000001")  # new_avg.quantize(0.00000001)
 
-_OPS: Mapping[str, Callable[[Any, Any], bool]] = {
-    "==": operator.eq,
-    "!=": operator.ne,
-    "<": operator.lt,
-    "<=": operator.le,
-    ">": operator.gt,
-    ">=": operator.ge,
+# 행으로 계산하는 불변식(스냅샷 자기 검사 대상). constraints는 schema 구획만 본다
+ROW_BASED = frozenset(INVARIANT_IDS) - {"constraints"}
+
+# 기대 스키마(workloads/order/db/schema.sql, 커밋 6e8f38b). judge가 읽는 열과 그 값을 지키는 제약만 본다.
+# 열은 format_type + not null 여부(snapshot_schema.sql), 제약은 pg_get_constraintdef(PostgreSQL 16) 문자열이다.
+# 제약은 이름이 아니라 정의로 찾는다(이름은 자동 생성이라 바뀔 수 있다). 더 있는 열·제약은 괜찮다.
+# FOREIGN KEY는 보지 않는다(계좌 없는 주문은 cash가 위반으로 센다). ticks는 fresh(선택)만 쓰므로 보지 않는다.
+EXPECTED_TABLES = ("accounts", "positions", "orders")
+EXPECTED_COLUMNS: Mapping[str, Mapping[str, str]] = {
+    "accounts": {"user_id": "text not null", "krw": "numeric(24,4) not null"},
+    "positions": {
+        "user_id": "text not null",
+        "market": "text not null",
+        "volume": "numeric(30,8) not null",
+        "avg_price": "numeric(24,8) not null",
+    },
+    "orders": {
+        "id": "bigint not null",
+        "client_order_id": "text not null",
+        "user_id": "text not null",
+        "market": "text not null",
+        "side": "text not null",
+        "volume": "numeric(30,8) not null",
+        "status": "text not null",
+        "fill_price": "numeric(24,8)",
+        "amount": "numeric(24,4)",
+        "created_at": "timestamp with time zone not null",
+        "filled_at": "timestamp with time zone",
+    },
+}
+EXPECTED_CONSTRAINTS: Mapping[str, tuple[str, ...]] = {
+    "accounts": (
+        "PRIMARY KEY (user_id)",
+        "CHECK ((krw >= (0)::numeric))",
+    ),
+    "positions": (
+        "PRIMARY KEY (user_id, market)",
+        "CHECK ((volume >= (0)::numeric))",
+        "CHECK ((avg_price >= (0)::numeric))",
+    ),
+    "orders": (
+        "PRIMARY KEY (id)",
+        "UNIQUE (client_order_id)",
+        "CHECK ((side = ANY (ARRAY['bid'::text, 'ask'::text])))",
+        "CHECK ((volume > (0)::numeric))",
+        "CHECK ((status = ANY (ARRAY['accepted'::text, 'pending'::text, "
+        "'filled'::text, 'rejected'::text])))",
+        "CHECK (((status <> 'filled'::text) OR ((fill_price IS NOT NULL) AND "
+        "(amount IS NOT NULL) AND (filled_at IS NOT NULL))))",
+    ),
 }
 
 
-# ---------------------------------------------------------------- 기준 항목 → 구획 규칙
+# ---------------------------------------------------------------- 공용
 
 
 @dataclass(frozen=True)
-class _Rule:
-    required: bool
-    on_violation: str
-    op: str
-    value: Any
-    items: tuple[str, ...]
+class Scope:
+    """arith·fresh 대상(명세 7): run 주문(+extra 계좌 주문). run_id가 None이면 모든 주문이다."""
+
+    run_id: str | None = None
+    extra: frozenset[str] = frozenset()
+
+    def covers(self, o: DbOrder) -> bool:
+        if self.run_id is None:
+            return True
+        return is_run_key(o.client_order_id, self.run_id) or o.user_id in self.extra
 
 
-def _criteria_of(crit: Any) -> tuple[Criteria | None, IntegrityCfg]:
+def scope_of(ctx_like: Any) -> Scope:
+    """RunContext 등(run_id·extra_accounts 속성)에서 Scope를 만든다. None이면 전체."""
+    if ctx_like is None:
+        return Scope()
+    return Scope(
+        run_id=getattr(ctx_like, "run_id", None),
+        extra=frozenset(getattr(ctx_like, "extra_accounts", ()) or ()),
+    )
+
+
+def _s(v: Decimal | None) -> str | None:
+    """Decimal → 지수 없는 문자열(서비스 응답과 같은 f"{d:f}")."""
+    return None if v is None else format(v, "f")
+
+
+def _filled(orders: Iterable[DbOrder]) -> list[DbOrder]:
+    return [o for o in orders if o.status == STATUS_FILLED]
+
+
+def _pair(user: str, market: str | None) -> str:
+    return f"{user}/{market if market is not None else ''}"
+
+
+def _missing(
+    inv_id: str, db: DbSnapshot, need: Sequence[str]
+) -> InvariantResult | None:
+    miss = [s for s in need if s not in db.sections]
+    if not miss:
+        return None
+    return InvariantResult(
+        id=inv_id,
+        source=SOURCE,
+        violations=None,
+        reasons=(R.DB_ERROR,),
+        detail={"missing_sections": miss},
+    )
+
+
+def _violation(
+    inv_id: str,
+    subject: str,
+    problem: str,
+    expected: Any = None,
+    actual: Any = None,
+    **detail: Any,
+) -> InvariantViolation:
+    return InvariantViolation(
+        invariant=inv_id,
+        subject=subject,
+        expected=_s(expected) if isinstance(expected, Decimal) else expected,
+        actual=_s(actual) if isinstance(actual, Decimal) else actual,
+        detail={"problem": problem, **detail},
+    )
+
+
+def _examples(viols: Sequence[InvariantViolation]) -> tuple[InvariantViolation, ...]:
+    def key(v: InvariantViolation) -> tuple[str, str]:
+        return (v.subject, canonical_json(v))
+
+    return tuple(sorted(viols, key=key)[:EXAMPLES_MAX])
+
+
+def _counted(
+    inv_id: str,
+    viols: Sequence[InvariantViolation],
+    detail: Mapping[str, Any],
+    *,
+    reasons: Sequence[str] = (),
+) -> InvariantResult:
+    return InvariantResult(
+        id=inv_id,
+        source=SOURCE,
+        violations=len(viols),
+        examples=_examples(viols),
+        reasons=tuple(reasons),
+        detail=dict(detail),
+    )
+
+
+# ---------------------------------------------------------------- cash
+
+
+@dataclass
+class _Flow:
+    bid: Decimal = Decimal(0)
+    ask: Decimal = Decimal(0)
+    bad: list[int] = field(default_factory=list)
+
+
+def check_cash(db: DbSnapshot, initial_krw: Decimal) -> InvariantResult:
+    """모든 계좌: krw + Σ(bid amount) − Σ(ask amount) = initial_krw(명세 7 cash).
+
+    problem: mismatch(식이 안 맞음), krw_null, order_null(filled 주문 amount NULL·side 이상),
+    no_account(주문은 있는데 계좌 행이 없다).
+    """
+    miss = _missing("cash", db, ("accounts", "orders"))
+    if miss is not None:
+        return miss
+    filled = _filled(db.orders)
+    flows: dict[str, _Flow] = {}
+    accounts = {a.user_id: a for a in db.accounts}
+    viols: list[InvariantViolation] = []
+    with localcontext(EXACT_CONTEXT):
+        for o in filled:
+            f = flows.setdefault(o.user_id, _Flow())
+            if o.amount is None or o.side not in (SIDE_BID, SIDE_ASK):
+                f.bad.append(o.id)
+            elif o.side == SIDE_BID:
+                f.bid += o.amount
+            else:
+                f.ask += o.amount
+        for uid in sorted(set(accounts) | set(flows)):
+            a = accounts.get(uid)
+            f = flows.get(uid, _Flow())
+            expected = initial_krw - f.bid + f.ask
+            actual = None if a is None else a.krw
+            if a is None:
+                problem = "no_account"
+            elif f.bad:
+                problem = "order_null"
+            elif actual is None:
+                problem = "krw_null"
+            elif actual != expected:
+                problem = "mismatch"
+            else:
+                continue
+            viols.append(
+                _violation(
+                    "cash",
+                    uid,
+                    problem,
+                    expected,
+                    actual,
+                    bid_amount=_s(f.bid),
+                    ask_amount=_s(f.ask),
+                    bad_orders=sorted(f.bad)[:EXAMPLES_MAX],
+                )
+            )
+    detail = {
+        "accounts": len(accounts),
+        "filled_orders": len(filled),
+        "initial_krw": _s(initial_krw),
+    }
+    return _counted("cash", viols, detail)
+
+
+# ---------------------------------------------------------------- qty
+
+
+def check_qty(db: DbSnapshot) -> InvariantResult:
+    """모든 (user, market) ∈ positions ∪ orders: volume(없으면 0) = Σ bid − Σ ask(명세 7 qty).
+
+    problem: mismatch, volume_null(positions.volume NULL), order_null(filled 주문 volume NULL·side 이상).
+    """
+    miss = _missing("qty", db, ("positions", "orders"))
+    if miss is not None:
+        return miss
+    filled = _filled(db.orders)
+    net: dict[str, Decimal] = {}
+    bad: dict[str, list[int]] = {}
+    pos = {_pair(p.user_id, p.market): p for p in db.positions}
+    viols: list[InvariantViolation] = []
+    with localcontext(EXACT_CONTEXT):
+        for o in filled:
+            k = _pair(o.user_id, o.market)
+            if o.volume is None or o.side not in (SIDE_BID, SIDE_ASK):
+                bad.setdefault(k, []).append(o.id)
+                continue
+            delta = o.volume if o.side == SIDE_BID else -o.volume
+            net[k] = net.get(k, Decimal(0)) + delta
+        for k in sorted(set(pos) | set(net) | set(bad)):
+            p = pos.get(k)
+            expected = net.get(k, Decimal(0))
+            actual = Decimal(0) if p is None else p.volume
+            if k in bad:
+                problem = "order_null"
+            elif actual is None:
+                problem = "volume_null"
+            elif actual != expected:
+                problem = "mismatch"
+            else:
+                continue
+            viols.append(
+                _violation(
+                    "qty",
+                    k,
+                    problem,
+                    expected,
+                    actual,
+                    position_row=p is not None,
+                    bad_orders=sorted(bad.get(k, ()))[:EXAMPLES_MAX],
+                )
+            )
+    detail = {
+        "pairs": len(set(pos) | set(net) | set(bad)),
+        "filled_orders": len(filled),
+    }
+    return _counted("qty", viols, detail)
+
+
+# ---------------------------------------------------------------- avg
+
+
+@dataclass(frozen=True)
+class Replay:
+    """한 (user, market)의 filled 주문을 서비스 공식대로 재생한 결과.
+
+    oversold: 보유량보다 많이 판 ask 주문 id(서비스는 422로 거절하므로 정상이면 없다).
+    error: 계산할 수 없었던 이유(체결 열 NULL, 0으로 나눔 등). 있으면 volume·avg는 그 직전 값이다.
+    """
+
+    volume: Decimal
+    avg_price: Decimal
+    orders: int
+    oversold: tuple[int, ...] = ()
+    error: str | None = None
+
+
+def replay_position(orders: Iterable[DbOrder]) -> Replay:
+    """filled 주문을 id 순으로 orders.place_order와 같은 식으로 재생한다(명세 7 avg).
+
+    bid: new_volume = held + v, new_avg = ((held·avg + v·price) / new_volume).quantize(1e-8).
+    ask: new_volume = held − v, avg 그대로(0이 돼도 유지). 계산은 기본 context(28자리, HALF_EVEN)다.
+    price는 DB fill_price(서비스가 쓴 Redis 가격을 NUMERIC(24,8)로 저장한 값)다.
+    """
+    held = Decimal(0)
+    avg = Decimal(0)
+    n = 0
+    oversold: list[int] = []
+    with localcontext(SERVICE_CONTEXT):
+        for o in sorted(_filled(orders), key=lambda x: x.id):
+            n += 1
+            if o.volume is None or o.fill_price is None:
+                return Replay(
+                    held, avg, n, tuple(oversold), f"주문 {o.id}: 체결 열 NULL"
+                )
+            try:
+                if o.side == SIDE_BID:
+                    new_volume = held + o.volume
+                    avg = (
+                        (held * avg + o.volume * o.fill_price) / new_volume
+                    ).quantize(Q_AVG)
+                    held = new_volume
+                elif o.side == SIDE_ASK:
+                    if held < o.volume:
+                        oversold.append(o.id)
+                    held = held - o.volume
+                else:
+                    return Replay(
+                        held, avg, n, tuple(oversold), f"주문 {o.id}: side {o.side!r}"
+                    )
+            except ArithmeticError as e:
+                return Replay(
+                    held, avg, n, tuple(oversold), f"주문 {o.id}: {type(e).__name__}"
+                )
+    return Replay(held, avg, n, tuple(oversold))
+
+
+def check_avg(db: DbSnapshot) -> InvariantResult:
+    """모든 (user, market): 재생한 avg_price = positions.avg_price, 정확히 같음(명세 7 avg).
+
+    사용자별로는 accounts FOR UPDATE로 직렬화되어 orders.id 순서 = 처리 순서다(명세 1).
+    problem: mismatch, avg_null, position_missing(주문은 있는데 positions 행이 없다), replay_error.
+    """
+    miss = _missing("avg", db, ("positions", "orders"))
+    if miss is not None:
+        return miss
+    by_pair: dict[str, list[DbOrder]] = {}
+    for o in _filled(db.orders):
+        by_pair.setdefault(_pair(o.user_id, o.market), []).append(o)
+    pos = {_pair(p.user_id, p.market): p for p in db.positions}
+    viols: list[InvariantViolation] = []
+    oversold = 0
+    for k in sorted(set(pos) | set(by_pair)):
+        rp = replay_position(by_pair.get(k, ()))
+        oversold += len(rp.oversold)
+        p = pos.get(k)
+        actual = None if p is None else p.avg_price
+        if rp.error is not None:
+            problem = "replay_error"
+        elif p is None:
+            problem = "position_missing"
+        elif actual is None:
+            problem = "avg_null"
+        elif actual != rp.avg_price:
+            problem = "mismatch"
+        else:
+            continue
+        viols.append(
+            _violation(
+                "avg",
+                k,
+                problem,
+                rp.avg_price,
+                actual,
+                orders=rp.orders,
+                replay_volume=_s(rp.volume),
+                error=rp.error,
+                oversold=list(rp.oversold[:EXAMPLES_MAX]),
+            )
+        )
+    detail = {"pairs": len(set(pos) | set(by_pair)), "oversold_orders": oversold}
+    return _counted("avg", viols, detail)
+
+
+# ---------------------------------------------------------------- nonneg
+
+
+def check_nonneg(db: DbSnapshot) -> InvariantResult:
+    """krw ≥ 0(accounts), volume ≥ 0, avg_price ≥ 0(positions). NULL도 위반이다(명세 7 nonneg)."""
+    miss = _missing("nonneg", db, ("accounts", "positions"))
+    if miss is not None:
+        return miss
+    viols: list[InvariantViolation] = []
+
+    def see(subject: str, table: str, column: str, v: Decimal | None) -> None:
+        if v is None or v < 0:
+            problem = "null" if v is None else "negative"
+            viols.append(
+                _violation(
+                    "nonneg", subject, problem, ">= 0", v, table=table, column=column
+                )
+            )
+
+    for a in db.accounts:
+        see(a.user_id, "accounts", "krw", a.krw)
+    for p in db.positions:
+        k = _pair(p.user_id, p.market)
+        see(k, "positions", "volume", p.volume)
+        see(k, "positions", "avg_price", p.avg_price)
+    detail = {"accounts": len(db.accounts), "positions": len(db.positions)}
+    return _counted("nonneg", viols, detail)
+
+
+# ---------------------------------------------------------------- arith
+
+
+def check_arith(db: DbSnapshot, scope: Scope = Scope()) -> InvariantResult:
+    """run 주문(+extra)의 filled 주문: amount = ROUND_DOWN(fill_price × volume, 4)(명세 7 arith).
+
+    곱은 서비스처럼 기본 context(28자리)로 계산한다. problem: mismatch, null, error.
+    """
+    miss = _missing("arith", db, ("orders",))
+    if miss is not None:
+        return miss
+    targets = [o for o in _filled(db.orders) if scope.covers(o)]
+    viols: list[InvariantViolation] = []
+    with localcontext(SERVICE_CONTEXT):
+        for o in targets:
+            ids = {
+                "order_id": o.id,
+                "fill_price": _s(o.fill_price),
+                "volume": _s(o.volume),
+            }
+            if o.fill_price is None or o.volume is None or o.amount is None:
+                viols.append(
+                    _violation(
+                        "arith", o.client_order_id, "null", None, o.amount, **ids
+                    )
+                )
+                continue
+            try:
+                expected = (o.fill_price * o.volume).quantize(
+                    Q_AMOUNT, rounding=ROUND_DOWN
+                )
+            except ArithmeticError as e:
+                viols.append(
+                    _violation(
+                        "arith",
+                        o.client_order_id,
+                        "error",
+                        None,
+                        o.amount,
+                        error=type(e).__name__,
+                        **ids,
+                    )
+                )
+                continue
+            if o.amount != expected:
+                viols.append(
+                    _violation(
+                        "arith",
+                        o.client_order_id,
+                        "mismatch",
+                        expected,
+                        o.amount,
+                        **ids,
+                    )
+                )
+    detail = {"orders": len(targets), "run_id": scope.run_id}
+    return _counted("arith", viols, detail)
+
+
+# ---------------------------------------------------------------- constraints
+
+
+def _norm(s: str | None) -> str:
+    return " ".join((s or "").split())
+
+
+def check_constraints(db: DbSnapshot) -> InvariantResult:
+    """schema 구획이 기대 스키마를 담는지 본다(명세 7 constraints).
+
+    빠진 테이블·열, 열 형식(타입·NOT NULL) 차이, 빠진 제약(검증 안 된 NOT VALID 제약도 빠진 것으로 본다)이
+    하나라도 있으면 violations None + SCHEMA_DRIFT다(판정 불가. FAIL로 세지 않는다).
+    problem: table_missing, column_missing, column_type, constraint_missing.
+    """
+    miss = _missing("constraints", db, ("schema",))
+    if miss is not None:
+        return miss
+    tables = {s.name for s in db.schema if s.kind == "table"}
+    cols = {(s.table, s.name): s.detail for s in db.schema if s.kind == "column"}
+    cons: dict[str, list[str]] = {}
+    for s in db.schema:
+        if s.kind == "constraint":
+            cons.setdefault(s.table, []).append(_norm(s.detail))
+    drift: list[InvariantViolation] = []
+    for t in EXPECTED_TABLES:
+        if t not in tables:
+            drift.append(_violation("constraints", t, "table_missing", "table", None))
+            continue
+        for c, want in EXPECTED_COLUMNS[t].items():
+            got = cols.get((t, c))
+            subject = f"{t}.{c}"
+            if got is None:
+                drift.append(_violation("constraints", subject, "column_missing", want))
+            elif _norm(got) != _norm(want):
+                drift.append(
+                    _violation("constraints", subject, "column_type", want, got)
+                )
+        have = cons.get(t, [])
+        for want in EXPECTED_CONSTRAINTS[t]:
+            w = _norm(want)
+            if w in have:
+                continue
+            near = next((h for h in have if h.startswith(w)), None)  # 예: ... NOT VALID
+            drift.append(
+                _violation("constraints", f"{t}: {w}", "constraint_missing", w, near)
+            )
+    detail = {
+        "tables": sorted(tables),
+        "expected_tables": list(EXPECTED_TABLES),
+        "drift": len(drift),
+    }
+    if drift:
+        return InvariantResult(
+            id="constraints",
+            source=SOURCE,
+            violations=None,
+            examples=_examples(drift),
+            reasons=(R.SCHEMA_DRIFT,),
+            detail=detail,
+        )
+    return _counted("constraints", (), detail)
+
+
+# ---------------------------------------------------------------- fresh
+
+
+def check_fresh(
+    db: DbSnapshot, scope: Scope = Scope(), stale_ms: int = DEFAULT_STALE_MS
+) -> InvariantResult:
+    """run 주문(+extra)의 filled 주문마다 같은 market에서 price = fill_price이고
+    received_at ∈ [filled_at − stale_ms − 1s, filled_at + 1s](양끝 포함)인 tick이 있다(명세 7 fresh).
+
+    - 체결 열(filled_at, fill_price, market)이 NULL인 주문은 건너뛴다(skipped. FILL_STATE가 센다).
+    - 그 market의 tick이 구획에 하나도 없으면 그 주문은 볼 수 없다(unevaluated).
+    - 위반이 있으면 위반 수. 위반 없이 볼 수 없는 주문이 있으면 None + NOT_EVALUATED(ticks가 비면 이것).
+    - ticks 구획이 없으면(psql 오류) None + DB_ERROR.
+    """
+    miss = _missing("fresh", db, ("orders", "ticks"))
+    if miss is not None:
+        return miss
+    times: dict[str, list[int]] = {}
+    prices: dict[str, list[Decimal]] = {}
+    usable = sorted(
+        (t.market, t.received_us, t.price)
+        for t in db.ticks
+        if t.received_us is not None and t.price is not None
+    )
+    for market, at, price in usable:
+        times.setdefault(market, []).append(at)
+        prices.setdefault(market, []).append(price)
+    lo_us = (stale_ms + TICK_SLACK_MS) * 1000
+    hi_us = TICK_SLACK_MS * 1000
+    targets = [o for o in _filled(db.orders) if scope.covers(o)]
+    viols: list[InvariantViolation] = []
+    skipped = 0
+    unevaluated: list[str] = []
+    for o in targets:
+        if o.filled_us is None or o.fill_price is None or o.market is None:
+            skipped += 1
+            continue
+        ts = times.get(o.market)
+        if not ts:
+            unevaluated.append(o.client_order_id)
+            continue
+        lo, hi = o.filled_us - lo_us, o.filled_us + hi_us
+        i, j = bisect.bisect_left(ts, lo), bisect.bisect_right(ts, hi)
+        if any(prices[o.market][x] == o.fill_price for x in range(i, j)):
+            continue
+        viols.append(
+            _violation(
+                "fresh",
+                o.client_order_id,
+                "no_tick",
+                o.fill_price,
+                None,
+                order_id=o.id,
+                market=o.market,
+                filled_at=iso_us(o.filled_us),
+                window=[iso_us(lo), iso_us(hi)],
+                ticks_in_window=j - i,
+            )
+        )
+    detail = {
+        "orders": len(targets),
+        "ticks": len(db.ticks),
+        "skipped": skipped,
+        "unevaluated": len(unevaluated),
+        "unevaluated_examples": sorted(unevaluated)[:EXAMPLES_MAX],
+        "stale_ms": stale_ms,
+        "slack_ms": TICK_SLACK_MS,
+    }
+    if not viols and unevaluated:
+        return InvariantResult(
+            id="fresh",
+            source=SOURCE,
+            violations=None,
+            reasons=(R.NOT_EVALUATED,),
+            detail=detail,
+        )
+    return _counted("fresh", viols, detail)
+
+
+# ---------------------------------------------------------------- 스냅샷 자기 검사
+
+
+def snapshot_consistent(db: DbSnapshot) -> bool | None:
+    """F1 == F2(정지)일 때 파싱한 행의 지문이 F1과 같으면 True, 다르면 False.
+
+    정지가 아니거나(db_quiescent 가드 몫) 구획이 모자라면 None(판단하지 않는다).
+    F1·F2는 스냅샷 트랜잭션 밖에서 잰다(db.py). 정지 상태면 그 사이 스냅샷도 같은 상태다.
+    """
+    if not db.quiescent or not {"accounts", "positions", "orders"} <= db.sections:
+        return None
+    with localcontext(EXACT_CONTEXT):
+        fp = compute_fingerprint(db.accounts, db.positions, db.orders)
+    return fp == db.fingerprint1
+
+
+def _untrusted(r: InvariantResult, db: DbSnapshot) -> InvariantResult:
+    with localcontext(EXACT_CONTEXT):
+        parsed = compute_fingerprint(db.accounts, db.positions, db.orders)
+    return replace(
+        r,
+        violations=None,
+        reasons=tuple(sorted({*r.reasons, R.JUDGE_SELF_CHECK})),
+        detail={
+            **r.detail,
+            "snapshot_consistent": False,
+            "computed_violations": r.violations,
+            "fingerprint1": to_jsonable(db.fingerprint1),
+            "parsed_fingerprint": to_jsonable(parsed),
+        },
+    )
+
+
+# ---------------------------------------------------------------- 공개 함수
+
+
+def _cfg(crit: Any) -> IntegrityCfg:
     if crit is None:
-        return None, IntegrityCfg(response_fields={})
+        return IntegrityCfg()
     if isinstance(crit, IntegrityCfg):
-        return None, crit
+        return crit
     if isinstance(crit, Mapping):
         crit = Criteria(data=crit)
     if not isinstance(crit, Criteria):
-        raise TypeError(f"crit는 Criteria|IntegrityCfg|None이어야 한다: {type(crit)!r}")
-    try:
-        cfg = integrity_cfg(crit)
-    except (KeyError, TypeError):
-        cfg = IntegrityCfg(response_fields={})
-    return crit, cfg
+        raise TypeError(
+            f"crit는 Criteria|IntegrityCfg|Mapping|None이어야 한다: {type(crit)!r}"
+        )
+    if "integrity" not in crit.data:
+        return IntegrityCfg()
+    return integrity_cfg(crit)
+
+
+def check_invariants(
+    db: DbSnapshot | None,
+    ctx_like: Any = None,
+    crit: Any = None,
+) -> list[InvariantResult]:
+    """불변식 7개를 INVARIANT_IDS 순서로 평가한다(명세 7).
+
+    ctx_like: run_id·extra_accounts 속성(RunContext 등). arith·fresh 대상을 정한다. None이면 전체.
+    crit: Criteria(권장), IntegrityCfg, 맵, 또는 None. initial_krw·stale_ms를 읽는다.
+    """
+    snap = db if db is not None else DbSnapshot()
+    cfg = _cfg(crit)
+    scope = scope_of(ctx_like)
+    by_id = {
+        "cash": check_cash(snap, cfg.initial_krw),
+        "qty": check_qty(snap),
+        "avg": check_avg(snap),
+        "nonneg": check_nonneg(snap),
+        "arith": check_arith(snap, scope),
+        "constraints": check_constraints(snap),
+        "fresh": check_fresh(snap, scope, cfg.stale_ms),
+    }
+    out = [by_id[i] for i in INVARIANT_IDS]
+    if snapshot_consistent(snap) is False:
+        out = [_untrusted(r, snap) if r.id in ROW_BASED else r for r in out]
+    return out
+
+
+def invariant_counts(results: Sequence[InvariantResult]) -> dict[str, int | None]:
+    """id → 위반 수. 평가하지 못했으면 None(DB_ERROR, SCHEMA_DRIFT, NOT_EVALUATED 등)."""
+    return {r.id: r.violations for r in results}
 
 
 def _targets(item: Mapping[str, Any]) -> tuple[str, ...]:
@@ -121,419 +795,71 @@ def _targets(item: Mapping[str, Any]) -> tuple[str, ...]:
         return ()
     if "sql" in item:
         raw = item["sql"]
-        return (raw,) if isinstance(raw, str) else tuple(raw)
-    if item.get("check") == I7_ID:
-        return (I7_ID,)
+        return (raw,) if isinstance(raw, str) else tuple(str(x) for x in raw)
+    if item.get("check") in INTEGRITY_CHECKS:
+        return (str(item["check"]),)
     return ()
 
 
-def _rules(crit: Criteria | None) -> dict[str, _Rule]:
-    names = (*INVARIANT_SQL, I7_ID)
-    if crit is None:
-        return {
-            n: _Rule(n not in OPTIONAL_INVARIANT_SQL, "fail", "==", 0, ())
-            for n in names
-        }
-    refs: dict[str, list[Mapping[str, Any]]] = {n: [] for n in names}
-    for item in crit.checks:
-        for t in _targets(item):
-            if t in refs:
-                refs[t].append(item)
-    out: dict[str, _Rule] = {}
-    for n in names:
-        items = refs[n]
-        if not items:
-            out[n] = _Rule(False, "fail", "==", 0, ())
-            continue
-        required = any(bool(it.get("required", True)) for it in items)
-        req_items = [it for it in items if bool(it.get("required", True))] or items
-        ov = (
-            "fail"
-            if any(it.get("on_violation", "fail") == "fail" for it in req_items)
-            else "inconclusive"
-        )
-        first = items[0]
-        out[n] = _Rule(
-            required=required,
-            on_violation=ov,
-            op=str(first.get("op", "==")),
-            value=first.get("value", 0),
-            items=tuple(str(it["id"]) for it in items),
-        )
-    return out
-
-
-def _passes(n: int, rule: _Rule) -> bool:
-    cmp = _OPS.get(rule.op)
-    if cmp is None:
-        raise InputError(f"모르는 op {rule.op!r}(기준 {list(rule.items)})")
-    return cmp(Decimal(n), Decimal(str(rule.value)))
-
-
-def _sorted_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(
-        (dict(r) for r in rows),
-        key=lambda r: json.dumps(r, sort_keys=True, ensure_ascii=False, default=str),
-    )
-
-
-# ---------------------------------------------------------------- SQL 구획
-
-
-def _sql_result(db: DbSnapshot, name: str, rule: _Rule) -> CheckResult:
-    sid = f"inv_{name}"
-    base: dict[str, Any] = {"section": sid, "criteria": list(rule.items)}
-    rows = db.invariant_violations(name)
-    if rows is None:
-        return CheckResult(
-            id=sid,
-            kind=KIND,
-            outcome=Outcome.INCONCLUSIVE,
-            required=rule.required,
-            on_violation=rule.on_violation,
-            value=None,
-            reasons=(R.DB_ERROR,),
-            detail={**base, "missing": True},
-        )
-    advisory_kinds = ADVISORY_PROBLEMS.get(name, frozenset())
-    counted = [r for r in rows if r.get("problem") not in advisory_kinds]
-    advisory = [r for r in rows if r.get("problem") in advisory_kinds]
-    n = len(counted)
-    ok = _passes(n, rule)
-    reasons: tuple[str, ...] = ()
-    if not ok and name == "constraints":
-        reasons = (R.CONSTRAINT_MISSING,)
-    detail = {
-        **base,
-        "rows": n,
-        "examples": _sorted_rows(counted)[:EXAMPLES_MAX],
+def _part(r: InvariantResult | None) -> dict[str, Any]:
+    if r is None:
+        return {"violations": None, "reasons": [R.NOT_EVALUATED], "missing": True}
+    return {
+        "violations": r.violations,
+        "source": r.source,
+        "reasons": list(r.reasons),
+        "examples": to_jsonable(r.examples),
+        "detail": to_jsonable(r.detail),
     }
-    if advisory:
-        detail["advisory_rows"] = len(advisory)
-        detail["advisory_examples"] = _sorted_rows(advisory)[:EXAMPLES_MAX]
-    return CheckResult(
-        id=sid,
-        kind=KIND,
-        outcome=Outcome.PASS if ok else Outcome.FAIL,
-        required=rule.required,
-        on_violation=rule.on_violation,
-        value=n,
-        reasons=reasons,
-        detail=detail,
-    )
 
 
-# ---------------------------------------------------------------- I7
-
-
-def _timeline(points: Any) -> tuple[SpeedPoint, ...]:
-    out: list[SpeedPoint] = []
-    for p in points or ():
-        if isinstance(p, SpeedPoint):
-            sp = p
-        elif isinstance(p, Mapping):
-            try:
-                sp = SpeedPoint(from_ms=int(p["from_ms"]), speed=dec(p["speed"]))
-            except (KeyError, TypeError, ValueError) as e:
-                raise InputError(f"배속 점 형식이 아니다: {dict(p)!r}") from e
-        else:
-            raise InputError(f"배속 점 형식이 아니다: {p!r}")
-        if sp.speed is None or not sp.speed.is_finite() or sp.speed <= 0:
-            raise InputError(f"배속은 0보다 커야 한다: {p!r}")
-        out.append(sp)
-    out.sort(key=lambda s: s.from_ms)
-    for a, b in zip(out, out[1:]):
-        if a.from_ms == b.from_ms:
-            raise InputError(f"배속 타임라인에 같은 시각이 두 번 있다: {a.from_ms}")
-    return tuple(out)
-
-
-def speed_candidates(
-    t: int, timeline: Sequence[SpeedPoint], slack_ms: int = SPEED_SLACK_MS
-) -> tuple[Decimal, ...] | None:
-    """시각 t에 쓸 수 있는 배속들(정렬). 첫 점보다 이르면 None(모름).
-
-    t의 배속에 더해, |t − 전환 시각| ≤ slack_ms인 전환마다 앞뒤 배속을 넣는다.
-    """
-    if not timeline or t < timeline[0].from_ms:
-        return None
-    idx = 0
-    for i, p in enumerate(timeline):
-        if p.from_ms <= t:
-            idx = i
-    speeds = {timeline[idx].speed}
-    for i in range(1, len(timeline)):
-        if abs(t - timeline[i].from_ms) <= slack_ms:
-            speeds.add(timeline[i - 1].speed)
-            speeds.add(timeline[i].speed)
-    return tuple(sorted(speeds))
-
-
-@dataclass(frozen=True)
-class I7Eval:
-    """I7 계산 결과. 주문 id는 정렬돼 있다. 나이 추정값은 배속 1 기준 ms(Decimal)."""
-
-    filled: int
-    violations: tuple[str, ...]
-    undetermined: tuple[str, ...]
-    null_age: int
-    loose: int  # 전환 전후 느슨한 상한으로 통과시킨 수
-    db_age_max_ms: int | None
-    app_filled_max: Decimal | None
-    app_stale_min: Decimal | None
-    warnings: tuple[str, ...]
-
-
-def _candidates(
-    o: DbOrder, timeline: Sequence[SpeedPoint], slack_ms: int
-) -> tuple[tuple[Decimal, ...], bool] | None:
-    """(배속 후보, 시각을 아는지). 시각을 모르면 후보 전부가 같은 결론일 때만 판정한다."""
-    if o.symbol is not None and not o.symbol.startswith(REPLAY_PREFIX):
-        return (Decimal(1),), True
-    if not timeline:
-        return None
-    if o.received_ms is None:
-        return tuple(sorted({p.speed for p in timeline})), False
-    c = speed_candidates(o.received_ms, timeline, slack_ms)
-    return None if c is None else (c, True)
-
-
-def evaluate_i7(
-    orders: Sequence[DbOrder],
-    max_age_ms: int,
-    timeline: Sequence[SpeedPoint],
-    *,
-    slack_ms: int = SPEED_SLACK_MS,
-) -> I7Eval:
-    """신선도 위반 체결을 센다(설계 5.4 I7). 입력 순서와 관계없이 같은 결과다."""
-    limit = Decimal(max_age_ms)
-    viol: list[str] = []
-    und: list[str] = []
-    filled = null_age = loose = 0
-    db_age_max: int | None = None
-    filled_max: Decimal | None = None
-    stale_min: Decimal | None = None
-
-    for o in sorted(orders, key=lambda x: x.id):
-        if o.status == FILLED:
-            filled += 1
-            if o.received_ms is not None and o.ref_event_ts is not None:
-                age = o.received_ms - o.ref_event_ts
-                db_age_max = age if db_age_max is None else max(db_age_max, age)
-            if o.ref_age_ms is None:
-                viol.append(o.id)
-                null_age += 1
-                continue
-            cand = _candidates(o, timeline, slack_ms)
-            if cand is None:
-                und.append(o.id)
-                continue
-            speeds, known_t = cand
-            age = Decimal(o.ref_age_ms)
-            if age * speeds[0] > limit:  # 가장 느슨한 상한도 넘는다
-                viol.append(o.id)
-            elif not known_t and age * speeds[-1] > limit:
-                und.append(o.id)
-            elif len(speeds) > 1 and known_t:
-                loose += 1
-            if known_t and len(speeds) == 1:
-                norm = age * speeds[0]
-                filled_max = norm if filled_max is None else max(filled_max, norm)
-        elif (
-            o.status == REJECTED
-            and o.reject_reason == STALE_REASON
-            and o.ref_age_ms is not None
-        ):
-            cand = _candidates(o, timeline, slack_ms)
-            if cand is not None and cand[1] and len(cand[0]) == 1:
-                norm = Decimal(o.ref_age_ms) * cand[0][0]
-                stale_min = norm if stale_min is None else min(stale_min, norm)
-
-    warnings: list[str] = []
-    if (stale_min is not None and stale_min <= limit) or (
-        filled_max is not None and filled_max > limit
-    ):
-        warnings.append(R.APP_MAX_AGE_DIFFERS)
-    return I7Eval(
-        filled=filled,
-        violations=tuple(viol),
-        undetermined=tuple(und),
-        null_age=null_age,
-        loose=loose,
-        db_age_max_ms=db_age_max,
-        app_filled_max=filled_max,
-        app_stale_min=stale_min,
-        warnings=tuple(warnings),
-    )
-
-
-def _i7_result(
-    db: DbSnapshot,
-    rule: _Rule,
-    cfg: IntegrityCfg,
-    timeline: tuple[SpeedPoint, ...],
-) -> CheckResult:
-    base: dict[str, Any] = {
-        "section": "orders",
-        "criteria": list(rule.items),
-        "price_max_age_ms": cfg.price_max_age_ms,
-        "slack_ms": SPEED_SLACK_MS,
-        "speed_timeline": [
-            {"from_ms": p.from_ms, "speed": str(p.speed)} for p in timeline
-        ],
-        "feed_alive": "unverifiable",
-    }
-    if "orders" not in db.sections:
-        return CheckResult(
-            id=I7_ID,
-            kind=KIND,
-            outcome=Outcome.INCONCLUSIVE,
-            required=rule.required,
-            on_violation=rule.on_violation,
-            value=None,
-            reasons=(R.DB_ERROR,),
-            detail={**base, "missing": True},
-        )
-    ev = evaluate_i7(db.orders, cfg.price_max_age_ms, timeline)
-    n = len(ev.violations)
-    ok = _passes(n, rule)
-    if not ok:
-        outcome = Outcome.FAIL
-        reasons: tuple[str, ...] = (R.NO_SPEED_TIMELINE,) if ev.undetermined else ()
-    elif ev.undetermined:
-        outcome = Outcome.INCONCLUSIVE
-        reasons = (R.NO_SPEED_TIMELINE,)
-    else:
-        outcome = Outcome.PASS
-        reasons = ()
-    detail = {
-        **base,
-        "filled": ev.filled,
-        "violations": n,
-        "null_ref_age": ev.null_age,
-        "undetermined": len(ev.undetermined),
-        "loose_window": ev.loose,
-        "examples": list(ev.violations[:EXAMPLES_MAX]),
-        "undetermined_examples": list(ev.undetermined[:EXAMPLES_MAX]),
-        "db_clock_age_max_ms": ev.db_age_max_ms,
-        "app_age_estimate": {
-            "filled_max": None if ev.app_filled_max is None else str(ev.app_filled_max),
-            "stale_min": None if ev.app_stale_min is None else str(ev.app_stale_min),
-        },
-        "warnings": list(ev.warnings),
-    }
-    return CheckResult(
-        id=I7_ID,
-        kind=KIND,
-        outcome=outcome,
-        required=rule.required,
-        on_violation=rule.on_violation,
-        value=n if outcome is not Outcome.INCONCLUSIVE else None,
-        reasons=reasons,
-        detail=detail,
-    )
-
-
-# ---------------------------------------------------------------- 공개 함수
-
-
-def check_invariants(
-    db: DbSnapshot,
-    ctx_like: Any = None,
-    crit: Any = None,
-    *,
-    speed_timeline: Sequence[SpeedPoint] | Sequence[Mapping[str, Any]] | None = None,
+def item_results(
+    results: Sequence[InvariantResult], crit: Criteria
 ) -> list[CheckResult]:
-    """불변식 구획별 CheckResult(INVARIANT_SQL 순서, 끝에 i7). 설계 5.4.
+    """불변식 결과를 기준 항목(kind integrity, sql: 또는 check:) 결과로 묶는다.
 
-    ctx_like: replay_speed 속성(SpeedPoint 목록)이 있으면 I7 배속으로 쓴다. None 가능.
-    crit: Criteria(권장), IntegrityCfg, 또는 None.
-    speed_timeline: Pod 관측 배속(설계 5.2 4단계). 비어 있지 않으면 ctx보다 우선한다.
-    """
-    criteria, cfg = _criteria_of(crit)
-    rules = _rules(criteria)
-    timeline = _timeline(speed_timeline) or _timeline(
-        getattr(ctx_like, "replay_speed", ())
-    )
-    out = [_sql_result(db, n, rules[n]) for n in INVARIANT_SQL]
-    out.append(_i7_result(db, rules[I7_ID], cfg, timeline))
-    return out
-
-
-def invariant_counts(results: Sequence[CheckResult]) -> dict[str, int | None]:
-    """이름(i2, ..., arith, privileges, i7) → 위반 수. INCONCLUSIVE면 None(구획 없음 등)."""
-    out: dict[str, int | None] = {}
-    for r in results:
-        name = r.id[len("inv_") :] if r.id.startswith("inv_") else r.id
-        out[name] = None if r.outcome is Outcome.INCONCLUSIVE else r.value
-    return dict(sorted(out.items()))
-
-
-def i4_counts(db: DbSnapshot) -> dict[str, int] | None:
-    """inv_i4 problem별 행 수(JUDGE_SELF_CHECK 교차 확인용). 구획이 없으면 None."""
-    rows = db.invariant_violations("i4")
-    if rows is None:
-        return None
-    return dict(sorted(Counter(str(r.get("problem")) for r in rows).items()))
-
-
-_SEVERITY = {Outcome.PASS: 0, Outcome.NA: 0, Outcome.INCONCLUSIVE: 1, Outcome.FAIL: 2}
-
-
-def item_results(results: Sequence[CheckResult], crit: Criteria) -> list[CheckResult]:
-    """구획 결과를 기준 항목(sql: 또는 check: i7을 가진 integrity 항목) 결과로 묶는다.
-
-    outcome은 가장 나쁜 구획 결과(FAIL > INCONCLUSIVE > PASS), value는 모두 평가됐을 때 합,
-    reasons는 구획 사유의 합집합이다. 항목의 id·required·on_violation을 쓴다.
-    verdict.evaluate_count_check(spec, invariant_counts(...))와 같은 결론이고 사유가 더 자세하다.
+    비교는 verdict.evaluate_count_check(위반 수 합, op·value)다. INCONCLUSIVE면 사유를 평가 못 한
+    불변식의 사유(DB_ERROR, SCHEMA_DRIFT, NOT_EVALUATED, JUDGE_SELF_CHECK)로 바꾼다.
+    detail.parts에 불변식별 위반 수·사유·예시를 둔다.
     """
     by_id = {r.id: r for r in results}
+    counts = invariant_counts(results)
     out: list[CheckResult] = []
     for item in crit.checks:
-        targets = _targets(item)
-        if not targets:
+        names = _targets(item)
+        if not names:
             continue
-        parts: list[CheckResult] = []
-        missing: list[str] = []
-        for t in targets:
-            r = by_id.get(t if t == I7_ID else f"inv_{t}")
-            if r is None:
-                missing.append(t)
-            else:
-                parts.append(r)
-        worst = max((_SEVERITY[p.outcome] for p in parts), default=0)
-        if missing:
-            worst = max(worst, 1)
-        outcome = [Outcome.PASS, Outcome.INCONCLUSIVE, Outcome.FAIL][worst]
-        reasons = sorted({c for p in parts for c in p.reasons})
-        if missing:
-            reasons = sorted({*reasons, R.NOT_EVALUATED})
-        values = [p.value for p in parts]
-        value = (
-            None
-            if missing or any(v is None for v in values)
-            else sum(int(v) for v in values)
-        )
-        out.append(
-            CheckResult(
-                id=str(item["id"]),
-                kind=KIND,
-                outcome=outcome,
-                required=bool(item.get("required", True)),
-                on_violation=str(item.get("on_violation", "fail")),
-                value=value,
-                reasons=tuple(reasons),
-                detail={
-                    "parts": {
-                        p.id: {
-                            "outcome": p.outcome.value,
-                            "value": p.value,
-                            "reasons": list(p.reasons),
-                        }
-                        for p in parts
-                    },
-                    "missing": missing,
-                },
-            )
-        )
+        res = evaluate_count_check(item, counts)
+        parts = {n: by_id.get(n) for n in names}
+        if res.outcome is Outcome.INCONCLUSIVE:
+            codes: set[str] = set()
+            for p in parts.values():
+                if p is None:
+                    codes.add(R.NOT_EVALUATED)
+                elif p.violations is None:
+                    codes.update(p.reasons or (R.NOT_EVALUATED,))
+            if codes:
+                res = replace(res, reasons=tuple(sorted(codes)))
+        detail = {
+            **res.detail,
+            "parts": {n: _part(p) for n, p in sorted(parts.items())},
+        }
+        out.append(replace(res, kind=KIND, detail=detail))
     return out
+
+
+def run_key_counts(db: DbSnapshot, run_id: str) -> dict[str, int] | None:
+    """run 키(`k6-<run_id>-<vu>-<seq>` 전체 형식) 주문 수. orders 구획이 없으면 None.
+
+    judge_self_check(명세 7) 대조식: keys = 분류기 D1 키 수 + ORPHAN 키 수,
+    orders − keys = 같은 키 중복 행 수(DUP_ORDER. UNIQUE라 정상이면 0).
+    접두어 `k6-<run_id>-`만 보면 r1117-crash가 r1117-crash-2 키까지 센다(그래서 전체 형식).
+    """
+    if "orders" not in db.sections:
+        return None
+    rows = db.run_orders(run_id)
+    return {
+        "orders": len(rows),
+        "keys": len({o.client_order_id for o in rows}),
+        "filled": sum(1 for o in rows if o.status == STATUS_FILLED),
+    }

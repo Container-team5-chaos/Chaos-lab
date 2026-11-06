@@ -22,13 +22,14 @@ from orchestrator.judge.errors import (
     EXIT_PASS,
     InputError,
 )
-from orchestrator.judge.model import Outcome, SpeedPoint, Verdict
+from orchestrator.judge.model import DbTarget, Outcome, SpeedPoint, Verdict
 from orchestrator.judge.transport import (
     CMD_PREFIX,
     PSQL_ARGS,
     TEST_PSQL_PREFIX,
     TransportError,
     Transports,
+    psql_args,
 )
 
 from .factories import ACCT_A, ACCT_EXTRA, RUN_ID, T0, make_intent
@@ -372,7 +373,7 @@ def test_mark_rejects_non_epoch_ms(run_json, at):
 
 def test_mark_speed_extra_account_obs(run_json):
     args = ["inject_start", "--at", str(T0), "--speed", "10"]
-    args += ["--extra-account", ACCT_EXTRA.upper()]
+    args += ["--extra-account", ACCT_EXTRA]
     args += ["--obs", "crash_restart=1", "--obs", "pod_replaced=true"]
     args += ["--obs", "note=manual"]
     assert mark(run_json, *args) == EXIT_PASS
@@ -381,9 +382,11 @@ def test_mark_speed_extra_account_obs(run_json):
     assert ctx.replay_speed == (SpeedPoint(from_ms=T0, speed=Decimal(10)),)
     assert ctx.extra_accounts == (ACCT_EXTRA,)
     assert dict(ctx.obs) == {"crash_restart": 1, "note": "manual", "pod_replaced": True}
-    # 같은 계좌를 다시 주면 바뀌지 않는다
+    # 같은 계좌를 다시 주면 바뀌지 않는다. user_id는 대소문자를 구분한다(TEXT PK)
     assert mark(run_json, "--extra-account", ACCT_EXTRA) == EXIT_PASS
     assert local_doc(run_json)["extra_accounts"] == [ACCT_EXTRA]
+    assert mark(run_json, "--extra-account", ACCT_EXTRA.upper()) == EXIT_PASS
+    assert local_doc(run_json)["extra_accounts"] == [ACCT_EXTRA, ACCT_EXTRA.upper()]
 
 
 def test_mark_speed_points_sorted_and_guarded(run_json):
@@ -414,7 +417,8 @@ def test_mark_obs_overwrite_needs_force(run_json):
     "args",
     [
         [],
-        ["--extra-account", "not-a-uuid"],
+        ["--extra-account", "user 0001"],
+        ["--extra-account", "x" * 65],
         ["--speed", "0"],
         ["--speed", "nan"],
         ["--obs", "Bad=1"],
@@ -442,9 +446,22 @@ def test_mark_rejects_corrupt_marks_local(run_json):
 
 
 def test_psql_argv_prefix_swap():
-    tail = ("exec", "-i", "postgres-0", "-c", "postgres", "--")
+    tail = ("exec", "-i", "postgres-0", "--")  # DbTarget 기본값에 container가 없다
     assert Transports().psql_argv() == CMD_PREFIX + tail + PSQL_ARGS
     assert Transports.for_local_pg().psql_argv() == TEST_PSQL_PREFIX + PSQL_ARGS
+    assert PSQL_ARGS[-6:] == ("-U", "exchange", "-d", "exchange", "-f", "-")
+    # run.json db 대상(명세 6). container가 있으면 -c를 붙인다. 비밀번호 인자는 없다
+    t = DbTarget(pod="pg-1", container="postgres", user="u1", database="d1")
+    argv = Transports().psql_argv(t)
+    assert argv == CMD_PREFIX + (
+        "exec",
+        "-i",
+        "pg-1",
+        "-c",
+        "postgres",
+        "--",
+    ) + psql_args(t)
+    assert "-W" not in argv and not any("password" in a.lower() for a in argv)
     swapped = Transports().with_prefix(("kubectl", "--context", "x", "-n", "p"))
     assert swapped.kubectl_argv("get", "pods")[:3] == ("kubectl", "--context", "x")
 

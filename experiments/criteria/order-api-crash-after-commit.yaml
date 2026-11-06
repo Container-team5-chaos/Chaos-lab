@@ -1,7 +1,9 @@
-# order-api-crash-after-commit(리허설): 장애 키는 k6 계좌 idx0 하나에만. 계좌당 약 0.1건/s라 TTL 300s 안에 주문이 온다(설계 6, 계산)
+# order-api-crash-after-commit(리허설): 앱에 FAULT 훅이 생기기 전까지 쓸 수 없음(확인 필요: 앱 팀).
+# workloads/order에는 커밋 뒤 프로세스를 죽이는 훅이 없다. 훅이 생기면 장애 키는 k6 계좌 idx0 하나에만 건다.
+# 기대 효과: 커밋 뒤 연결이 끊겨(st 0) 같은 키로 다시 보내면 200 replayed=true → OK(after_commit)
 extends: order-api-pod-kill.yaml
-disable: [unresolved_zero, pod_replaced]       # os._exit(1)은 Pod 교체가 아니라 컨테이너 재시작이다
+disable: [unresolved_zero, pod_replaced, shutdown_seen_by_k6]   # os._exit(1)은 Pod 교체가 아니라 컨테이너 재시작이다
 fault_effect:
   - {id: crash_restart, observe: crash_restart, target: order-api, min: 1}
-  - {id: crash_seen_by_k6, class_sub: [after_commit, lookup], account: idx0, op: '>=', value: 1}
+  - {id: crash_seen_by_k6, class_sub: [after_commit], account: idx0, op: '>=', value: 1}
 checks: [{id: unresolved_committed, kind: unresolved, class: [UNRESOLVED_COMMITTED], op: '==', value: 0}]

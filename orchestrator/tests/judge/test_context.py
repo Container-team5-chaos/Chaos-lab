@@ -6,8 +6,9 @@ from decimal import Decimal
 
 import pytest
 
-from orchestrator.judge.context import load_run
+from orchestrator.judge.context import check_user_id, load_run
 from orchestrator.judge.errors import EXIT_INPUT, InputError
+from orchestrator.judge.model import DbTarget
 
 T = 1_762_300_000_000
 
@@ -71,6 +72,8 @@ def test_optional_keys_default(tmp_path):
     assert ctx.faults == ()
     assert ctx.replay_speed == ()
     assert ctx.extra_accounts == ()
+    assert ctx.db == DbTarget()
+    assert ctx.key_prefix == "k6-r1117-crash-"
 
 
 def test_absolute_paths_kept(tmp_path):
@@ -119,8 +122,23 @@ def test_good_run_id(tmp_path, run_id):
         {"replay_speed": [{"from_ms": T, "speed": -1}]},
         {"replay_speed": [{"from_ms": T}]},
         {"replay_speed": [{"from_ms": T, "speed": 1}, {"from_ms": T, "speed": 10}]},
-        {"extra_accounts": ["not-a-uuid"]},
-        {"extra_accounts": "00000000-0000-4000-8000-0000000000ee"},
+        {"extra_accounts": ["user 0001"]},
+        {"extra_accounts": [""]},
+        {"extra_accounts": [5]},
+        {"extra_accounts": ["-user"]},
+        {"extra_accounts": ["u" * 65]},
+        {"extra_accounts": ["user-0001\n"]},
+        {"extra_accounts": "user-0999"},
+        {"db": "postgres-0"},
+        {"db": {"host": "db.internal"}},
+        {"db": {"password": "x"}},
+        {"db": {"pod": "Postgres_0"}},
+        {"db": {"pod": "-postgres"}},
+        {"db": {"container": ""}},
+        {"db": {"container": "pg.main"}},
+        {"db": {"user": "-c"}},
+        {"db": {"user": "ex change"}},
+        {"db": {"database": 5}},
     ],
 )
 def test_invalid_fields(tmp_path, over):
@@ -155,10 +173,36 @@ def test_fault_extra_keys_kept(tmp_path):
     assert ctx.faults[0].end_ms is None
 
 
-def test_extra_accounts_normalized(tmp_path):
-    a = "00000000-0000-4000-8000-0000000000EE"
-    ctx = load_run(write(tmp_path, base_run(extra_accounts=[a, a.lower()])))
-    assert ctx.extra_accounts == ("00000000-0000-4000-8000-0000000000ee",)
+def test_extra_accounts_are_user_ids(tmp_path):
+    """발표자 계좌는 user_id다(명세 8). 순서를 지키고 중복은 뺀다."""
+    accts = ["user-0999", "user-0001", "user-0999"]
+    ctx = load_run(write(tmp_path, base_run(extra_accounts=accts)))
+    assert ctx.extra_accounts == ("user-0999", "user-0001")
+
+
+def test_check_user_id():
+    assert check_user_id("user-0001", "x") == "user-0001"
+    assert check_user_id("a" * 64, "x") == "a" * 64
+    with pytest.raises(InputError, match="--extra-account"):
+        check_user_id("not ok", "--extra-account")
+
+
+def test_db_target(tmp_path):
+    """psql 대상(명세 6). 빠진 키·null은 기본값이다."""
+    db = {"pod": "postgres-1", "container": "postgres", "user": "app_ro"}
+    ctx = load_run(write(tmp_path, base_run(db=db)))
+    assert ctx.db == DbTarget(
+        pod="postgres-1", container="postgres", user="app_ro", database="exchange"
+    )
+    ctx = load_run(write(tmp_path, base_run(db={"container": None})))
+    assert ctx.db == DbTarget()
+    ctx = load_run(write(tmp_path, base_run(db=None)))
+    assert ctx.db == DbTarget()
+
+
+def test_db_password_rejected_with_reason(tmp_path):
+    with pytest.raises(InputError, match="비밀번호"):
+        load_run(write(tmp_path, base_run(db={"password": "x"})))
 
 
 # ---------------------------------------------------------------- marks.local.json
@@ -174,7 +218,7 @@ def test_marks_local_fills_only_blanks(tmp_path):
             "k6_end": T + 600_000,
         },
         "replay_speed": [{"from_ms": T + 5, "speed": 1}],
-        "extra_accounts": ["00000000-0000-4000-8000-0000000000ee"],
+        "extra_accounts": ["user-0999"],
         "obs": {"speed_source": "mark", "note": "manual"},
     }
     write(tmp_path, local, "marks.local.json")
@@ -183,7 +227,7 @@ def test_marks_local_fills_only_blanks(tmp_path):
     assert ctx.inject_end == T + 400_000  # null이라 채움
     assert ctx.marks["k6_end"] == T + 600_000  # 없던 키 채움
     assert ctx.replay_speed[0].from_ms == T + 5  # 빈 목록이라 채움
-    assert ctx.extra_accounts == ("00000000-0000-4000-8000-0000000000ee",)
+    assert ctx.extra_accounts == ("user-0999",)
     assert ctx.obs == {"note": "manual", "speed_source": "pod"}
     assert ctx.filled_from_marks_local == (
         "marks.inject_end",
@@ -217,9 +261,10 @@ def test_marks_local_run_id_mismatch(tmp_path):
         load_run(p)
 
 
-def test_marks_local_unknown_key(tmp_path):
+@pytest.mark.parametrize("key", ["criteria", "db"])
+def test_marks_local_unknown_key(tmp_path, key):
     p = write(tmp_path, base_run())
-    write(tmp_path, {"criteria": "x.yaml"}, "marks.local.json")
+    write(tmp_path, {key: "x"}, "marks.local.json")
     with pytest.raises(InputError, match="모르는 키"):
         load_run(p)
 

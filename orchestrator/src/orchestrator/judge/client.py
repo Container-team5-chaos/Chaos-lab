@@ -49,7 +49,7 @@ __all__ = [
 
 T = TypeVar("T")
 
-PLAN_EXECUTOR = "ramping-arrival-rate"  # 설계 4.5, JSONL v1 run_start.plan
+PLAN_EXECUTOR = "ramping-arrival-rate"  # 설계 4.5, JSONL v2 run_start.plan
 RATIO_PLACES = 6  # achieved_ratio 소수 자릿수(내림)
 
 # 5.10 회복 시간 기본값(우리 설정값)
@@ -124,7 +124,7 @@ class _Segment:
 
 
 def _plan_segments(plan: Mapping[str, Any], origin_ms: int) -> list[_Segment]:
-    """JSONL v1 plan을 초당 도착률 구간으로 바꾼다. 형식이 틀리면 InputError."""
+    """run_start.plan을 초당 도착률 구간으로 바꾼다. 형식이 틀리면 InputError."""
     if not isinstance(plan, Mapping):
         raise InputError("run_start.plan은 객체여야 한다")
     if plan.get("executor") != PLAN_EXECUTOR:
@@ -179,10 +179,10 @@ def planned_arrivals(
 ) -> Fraction:
     """계획 도착 수 = plan 도착률의 적분(설계 4.5, 5.5).
 
-    - plan(JSONL v1) = {executor:"ramping-arrival-rate", time_unit_s, start_rate,
+    - plan(JSONL v2 run_start.plan) = {executor:"ramping-arrival-rate", time_unit_s, start_rate,
       stages:[{duration_s, target}]}. target은 time_unit_s당 도착 수이고, stage 안에서는
       앞 값에서 target까지 선형으로 변한다. duration 0인 stage는 순간 점프다.
-    - origin_ms: 시나리오 시작 시각(epoch ms). 보통 setup_done.t다.
+    - origin_ms: 시나리오 시작 시각(epoch ms). run_start.t다(JSONL v2에는 setup_done이 없다).
     - window: [from_ms, to_ms). None이면 계획 전체. 계획 밖은 0이다.
     """
     segs = _plan_segments(plan, origin_ms)
@@ -237,7 +237,7 @@ def achieved_ratio(
 # ---------------------------------------------------------------- 구간(설계 5.5)
 
 K6_START_MARK = (
-    "k6_start"  # 부하 시작(setup_done.t). 기준 YAML phases에서 표지 이름으로 쓴다
+    "k6_start"  # 부하 시작(run_start.t). 기준 YAML phases에서 표지 이름으로 쓴다
 )
 K6_END_MARK = "k6_end"  # 부하 끝(마지막 기록 시각 + 1)
 FAULT_PHASES = frozenset({"baseline", "fault", "recovery"})
@@ -246,19 +246,15 @@ FAULT_PHASES = frozenset({"baseline", "fault", "recovery"})
 def load_window(log: K6Log) -> tuple[int, int] | None:
     """부하 창 [k6_start, k6_end)(설계 5.5, 5.6 fault_in_load). k6 노드 시계다.
 
-    k6_start는 setup_done.t(없으면 run_start.t, 그것도 없으면 첫 기록 시각)다.
-    k6_end는 intent·result 시각 중 최댓값 + 1이다. 기록이 없으면 None.
+    k6_start는 run_start.t(없으면 첫 기록 시각)다. JSONL v2에는 setup_done이 없다.
+    k6_end는 intent 시각과 시도 끝 시각(atts[].t1) 중 최댓값 + 1이다. v2 result 줄에는
+    시각이 없어 마지막 시도 끝을 쓴다. 기록이 없으면 None.
     """
     times = [it.t for it in log.intents.values()]
-    times += [r.t for r in log.results.values()]
+    times += [a.t1 for r in log.results.values() for a in r.atts]
     if not times:
         return None
-    if log.setup_done is not None:
-        start = log.setup_done.t
-    elif log.run_start is not None:
-        start = log.run_start.t
-    else:
-        start = min(times)
+    start = log.run_start.t if log.run_start is not None else min(times)
     return start, max(start, max(times) + 1)
 
 

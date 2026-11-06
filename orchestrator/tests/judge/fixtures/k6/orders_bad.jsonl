@@ -1,14 +1,14 @@
-{"kind":"run_start","v":1,"run":"r-test","script_ver":"0.1.0","seed":42,"profile":"smoke","plan":{"executor":"ramping-arrival-rate","time_unit_s":60,"start_rate":0,"stages":[{"duration_s":0,"target":180},{"duration_s":10,"target":180}]},"symbols":["REPLAY:UPBIT:KRW-BTC","REPLAY:UPBIT:KRW-ETH"],"initial_cash":10000000,"conn_reuse":false,"t":1762299940000,"ws_reconnect":false}
-{"kind":"account","run":"r-test","idx":0,"acct":"00000000-0000-4000-8000-00000000000a","nick":"k6-r-test-0"}
-{"kind":"setup_done","run":"r-test","accounts":1,"t":1762299999000}
+{"type":"run_start","v":2,"run":"r-test","script_ver":"0.2.0","seed":42,"profile":"smoke","plan":{"executor":"ramping-arrival-rate","time_unit_s":60,"start_rate":0,"stages":[{"duration_s":0,"target":180},{"duration_s":10,"target":180}]},"symbols":["KRW-BTC"],"initial_cash":10000000,"vus":2,"t":1762299940000,"ws_reconnect":false}
+{"type":"intent","key":"k6-r-test-1-1","acct":"user-0001","vu":1,"t":1762300000000,"body":{"client_order_id":"k6-r-test-1-1","user_id":"user-0001","market":"KRW-BTC","side":"bid","volume":"0.00010000"}}
 
-{"kind":"intent","run":"r-test","key":"6a1f0c2e-5b7d-4c11-9e2a-000000000001","acct":"00000000-0000-4000-8000-00000000000a","vu":1,"t":1762300000000,"body":"{\"limit_price\":\"105000000\",\"qty\":\"0.00010000\",\"side\":\"buy\",\"symbol\":\"REPLAY:UPBIT:KRW-BTC\"}"}
-{"kind":"intent","run":"r-test","key":"6a1f0c2e-5b7d-4c11-9e
-{"kind":"mystery","run":"r-test"}
-{"kind":"result","run":"r-test","key":"6a1f0c2e-5b7d-4c11-9e2a-000000000001","atts":[{"n":1,"t0":1762300000000,"t1":1762300000012,"st":201,"ec":null,"ms":12}],"lookup":null,"ack":{"st":201,"raw":"{\"fee\":5,\"price\":\"100000000\",\"reason\":null,\"status\":\"FILLED\"}"},"t":1762300000112}
-{"kind":"ws_open","vu":3,"conn":1,"t":1762300000000}
+{"type":"intent","key":"k6-r-test-2-1","
+{"type":"mystery"}
+{"type":"result","key":"k6-r-test-1-1","atts":[{"n":1,"t0":1762300000001,"t1":1762300000011,"st":200,"ec":null,"ms":10,"raw":"{\"amount\":\"10000.0000\",\"client_order_id\":\"k6-r-test-1-1\",\"fill_price\":\"100000000.00000000\",\"filled_at\":\"2025-11-04T23:46:40.005123+00:00\",\"market\":\"KRW-BTC\",\"order_id\":100001,\"replayed\":false,\"side\":\"bid\",\"status\":\"filled\",\"user_id\":\"user-0001\",\"volume\":\"0.00010000\"}"}]}
+{"type":"ws_open","vu":3,"conn":1,"t":1762300000000}
 [1,2,3]
-{"kind":"intent","run":"r-test","key":"a","key":"b"}
-{"kind":"result","run":"r-test","key":"6a1f0c2e-5b7d-4c11-9e2a-000000000001","atts":[{"n":1,"t0":1762300000000,"t1":1762300000012,"st":201,"ec":null,"ms":NaN}],"lookup":null,"ack":{"st":201,"raw":"{\"fee\":5,\"price\":\"100000000\",\"reason\":null,\"status\":\"FILLED\"}"},"resend":{"atts":[{"n":1,"t0":1762300030000,"t1":1762300030005,"st":200,"ec":null,"ms":5}],"ack":{"st":200,"raw":"{\"fee\":5,\"price\":\"100000000\",\"reason\":null,\"status\":\"FILLED\"}"}},"t":1762300000112}
-{"kind":"intent","run":"r-test","key":"6a1f0c2e-5b7d-4c11-9e2a-000000000003","acct":"00000000-0000-4000-8000-00000000000a","vu":1,"t":1762300002,"body":"{\"limit_price\":\"105000000\",\"qty\":\"0.00010000\",\"side\":\"buy\",\"symbol\":\"REPLAY:UPBIT:KRW-BTC\"}"}
-{"kind":"result","run":"r-test","key":"6
+{"type":"intent","key":"a","key":"b"}
+{"type":"result","key":"k6-r-test-1-1","atts":[{"n":1,"t0":1762300000001,"t1":1762300000011,"st":200,"ec":null,"ms":NaN,"rp":false,"raw":"{\"amount\":\"10000.0000\",\"client_order_id\":\"k6-r-test-1-1\",\"fill_price\":\"100000000.00000000\",\"filled_at\":\"2025-11-04T23:46:40.005123+00:00\",\"market\":\"KRW-BTC\",\"order_id\":100001,\"replayed\":false,\"side\":\"bid\",\"status\":\"filled\",\"user_id\":\"user-0001\",\"volume\":\"0.00010000\"}"}]}
+{"type":"intent","key":"k6-r-test-1-2","acct":"user-0001","vu":1,"t":1762300002,"body":{"client_order_id":"k6-r-test-1-2","user_id":"user-0001","market":"KRW-BTC","side":"bid","volume":"0.00010000"}}
+{"kind":"intent","run":"r-test","key":"k6-r-test-1-2","acct":"user-0001","vu":1,"t":1762300002000,"body":{"client_order_id":"k6-r-test-1-2","user_id":"user-0001","market":"KRW-BTC","side":"bid","volume":"0.00010000"}}
+{"type":"account","run":"r-test","idx":0,"acct":"user-0001","nick":"k6-r-test-0"}
+{"type":"result","key":"k6-r-t

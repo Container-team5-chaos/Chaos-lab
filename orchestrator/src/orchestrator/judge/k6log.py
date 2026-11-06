@@ -1,12 +1,17 @@
-"""k6 주문 기록(orders.jsonl) 엄격 파서와 기록 완전성(설계 4.6, 4.8, 5.3).
+"""k6 주문 기록(orders.jsonl, JSONL v2) 엄격 파서와 기록 완전성(설계 4.6, 4.8, 5.3, 계약 정렬 명세 2).
 
-- 줄마다 JSON을 읽고 kind별 필수 필드를 검사한다. 문제는 예외로 멈추지 않고
+- 줄마다 JSON을 읽고 type별 필수 필드를 검사한다. 문제는 예외로 멈추지 않고
   K6Log.problems에 줄 번호와 함께 남긴다. 파일을 못 읽을 때만 InputError다.
 - problems 원소는 "<code> L<줄>: <설명>" 또는 "<code>: <설명>"이다. code는 이 모듈의
   소문자 문제 코드다(verdict 사유 코드가 아니다). problem_code()로 꺼낸다.
 - 설명에 문자열 필드 값을 넣지 않는다(길이만 적는다). 토큰이 섞여도 새지 않는다(설계 7.4).
-- 필드가 없거나 핵심 필드 값이 틀리면 그 줄을 버린다. 보조 값(plan, symbols,
-  initial_cash, conn_reuse, body 내용, ack·lookup 일관성)이 틀리면 줄은 살리고 문제만 남긴다.
+  client_order_id(키)는 비밀이 아니라 그대로 적는다.
+- 필드가 없거나 핵심 필드 값이 틀리면 그 줄을 버린다. 보조 값(plan, symbols, initial_cash,
+  conn_reuse, vus, 시도 번호·rp 일관성)이 틀리면 줄은 살리고 문제만 남긴다.
+- v1 줄(kind 필드, account·setup_done 줄, result의 lookup·ack·resend, run_start v1)은
+  형식 오류(bad_version)로 버린다.
+- intent 형식 위반(key ≠ body.client_order_id, acct ≠ body.user_id, 키 형식 등)은
+  intent_format으로 표시만 한다. 기록 완전성과 무관하고 분류(PROTOCOL)는 classify가 한다.
 - .jsonl.gz도 읽는다. sha256은 압축을 푼 원본 바이트 기준이다(4.8 sha256sum과 같다).
 - WS 줄(ws_*, wsagg)은 2차라 kind_counts에 세기만 한다(4.9).
 """
@@ -17,7 +22,6 @@ import json
 import math
 import os
 import re
-import uuid
 import zlib
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
@@ -28,19 +32,19 @@ from typing import Any
 from .context import EPOCH_MS_MAX, EPOCH_MS_MIN
 from .errors import InputError
 from .model import (
+    ACK_STATUS,
+    CLIENT_ORDER_ID_MAX,
+    INTENT_BODY_FIELDS,
     JSONL_VERSION,
-    AccountRec,
-    Ack,
+    REPLAYED_FIELD,
     Attempt,
     CheckResult,
     Intent,
     K6Log,
-    Lookup,
     Outcome,
-    Resend,
     Result,
     RunStart,
-    SetupDone,
+    run_key_re,
     sha256_bytes,
 )
 from .reasons import SENT_LOG_INCOMPLETE
@@ -52,7 +56,9 @@ __all__ = [
     "LOG_COMPLETE_CONDITIONS",
     "LOG_COMPLETE_ID",
     "LOG_COMPLETE_KIND",
+    "RAW_MAX",
     "find_token_keys",
+    "intent_issues",
     "load_summary",
     "log_complete",
     "parse_k6log",
@@ -64,16 +70,17 @@ __all__ = [
 
 # ---------------------------------------------------------------- 상수
 
-KIND_RUN_START = "run_start"
-KIND_ACCOUNT = "account"
-KIND_SETUP_DONE = "setup_done"
-KIND_INTENT = "intent"
-KIND_RESULT = "result"
-KNOWN_KINDS = frozenset(
-    {KIND_RUN_START, KIND_ACCOUNT, KIND_SETUP_DONE, KIND_INTENT, KIND_RESULT}
-)
-WS_KIND_PREFIXES = ("ws_", "wsagg")  # 4.9 WS 줄. 2차라 세기만 한다
+TYPE_FIELD = "type"  # 줄 종류 필드(명세 2). v1은 kind였다
+V1_TYPE_FIELD = "kind"
+TYPE_RUN_START = "run_start"
+TYPE_INTENT = "intent"
+TYPE_RESULT = "result"
+TYPE_RUN_END = "run_end"  # 받기만 한다(필수 아님)
+KNOWN_TYPES = frozenset({TYPE_RUN_START, TYPE_INTENT, TYPE_RESULT, TYPE_RUN_END})
+V1_TYPES = frozenset({"account", "setup_done"})  # v2에 없는 줄 종류
+WS_TYPE_PREFIXES = ("ws_", "wsagg")  # 4.9 WS 줄. 2차라 세기만 한다
 
+# run_start는 v1 필드를 유지하고 vus를 더했다. conn_reuse는 있어도 되고 판정에 쓰지 않는다.
 RUN_START_FIELDS = (
     "v",
     "run",
@@ -83,19 +90,19 @@ RUN_START_FIELDS = (
     "plan",
     "symbols",
     "initial_cash",
-    "conn_reuse",
+    "vus",
     "t",
 )
-ACCOUNT_FIELDS = ("run", "idx", "acct", "nick")
-SETUP_DONE_FIELDS = ("run", "accounts", "t")
-INTENT_FIELDS = ("run", "key", "acct", "vu", "t", "body")
-RESULT_FIELDS = ("run", "key", "atts", "lookup", "ack", "resend", "t")
-ATTEMPT_FIELDS = ("n", "t0", "t1", "st", "ec", "ms")
-BODY_FIELDS = ("symbol", "side", "qty", "limit_price")  # 4.3 주문 본문
+RUN_START_OPTIONAL = ("conn_reuse",)
+INTENT_FIELDS = ("key", "acct", "vu", "t", "body")
+RESULT_FIELDS = ("key", "atts")
+V1_RESULT_FIELDS = ("lookup", "ack", "resend")  # 재전송이 atts에 합쳐져 없앴다
+ATTEMPT_FIELDS = ("n", "t0", "t1", "st", "ec", "ms", "rp", "raw")
+RAW_MAX = 2048  # attempt.raw 상한(명세 2)
 
 COUNTER_INTENTS = "order_intents"  # 4.7 완전성 대조 Counter
 COUNTER_RESULTS = "order_results"
-_COUNTERS = ((KIND_INTENT, COUNTER_INTENTS), (KIND_RESULT, COUNTER_RESULTS))
+_COUNTERS = ((TYPE_INTENT, COUNTER_INTENTS), (TYPE_RESULT, COUNTER_RESULTS))
 K6_OK_EXIT_CODES = frozenset({0, 99})  # 5.3. 99는 threshold 실패(abortOnFail 포함, 4.7)
 
 MAX_PROBLEMS_PER_CODE = 100  # 코드별 상한. 넘으면 "<code>: 그 밖 N건 생략" 한 줄
@@ -109,14 +116,11 @@ NOT_OBJECT = "not_object"
 DUP_KEY = "dup_key"
 MISSING_FIELD = "missing_field"
 BAD_FIELD = "bad_field"
-UNKNOWN_KIND = "unknown_kind"
-BAD_VERSION = "bad_version"
+UNKNOWN_TYPE = "unknown_type"
+BAD_VERSION = "bad_version"  # v1 줄·필드, run_start v ≠ 2
 GZIP_ERROR = "gzip_error"
 RUN_MIXED = "run_mixed"
 RUN_START_COUNT = "run_start_count"
-SETUP_DONE_COUNT = "setup_done_count"
-ACCOUNT_COUNT = "account_count"
-DUP_ACCOUNT = "dup_account"
 DUP_INTENT = "dup_intent"
 DUP_RESULT = "dup_result"
 ORPHAN_RESULT = "orphan_result"
@@ -124,6 +128,7 @@ COUNTER_SHORT = "counter_short"
 SUMMARY_INVALID = "summary_invalid"
 SHA_MISMATCH = "sha_mismatch"
 TOKEN_KEY = "token_key"
+INTENT_FORMAT = "intent_format"
 OTHER = "other"  # 코드 접두어가 없는 문제(직접 만든 K6Log 등)
 
 # log_complete 조건(설계 5.3). records_consistent는 이 모듈이 더한 조건이다.
@@ -146,8 +151,8 @@ LOG_COMPLETE_CONDITIONS = (
 LOG_COMPLETE_ID = "log_complete"
 LOG_COMPLETE_KIND = "log"
 
-# 문제 코드 → 깨지는 완전성 조건. None은 완전성과 무관(safety 가드 몫).
-# 여기 없는 코드는 lines_parsed로 본다(모르는 문제는 보수적으로 다룬다).
+# 문제 코드 → 깨지는 완전성 조건. None은 완전성과 무관하다(token은 safety 가드,
+# intent 형식은 classify PROTOCOL 몫). 여기 없는 코드는 lines_parsed로 본다.
 PROBLEM_CONDITION: Mapping[str, str | None] = {
     BAD_UTF8: COND_LINES,
     BAD_JSON: COND_LINES,
@@ -155,15 +160,12 @@ PROBLEM_CONDITION: Mapping[str, str | None] = {
     DUP_KEY: COND_LINES,
     MISSING_FIELD: COND_LINES,
     BAD_FIELD: COND_LINES,
-    UNKNOWN_KIND: COND_LINES,
+    UNKNOWN_TYPE: COND_LINES,
     BAD_VERSION: COND_LINES,
     GZIP_ERROR: COND_LINES,
     OTHER: COND_LINES,
     RUN_MIXED: COND_RUN,
     RUN_START_COUNT: COND_RUN_START,
-    SETUP_DONE_COUNT: COND_RECORDS,
-    ACCOUNT_COUNT: COND_RECORDS,
-    DUP_ACCOUNT: COND_RECORDS,
     DUP_INTENT: COND_RECORDS,
     DUP_RESULT: COND_RECORDS,
     ORPHAN_RESULT: COND_RECORDS,
@@ -171,13 +173,16 @@ PROBLEM_CONDITION: Mapping[str, str | None] = {
     SUMMARY_INVALID: COND_COUNTERS,
     SHA_MISMATCH: COND_SHA,
     TOKEN_KEY: None,
+    INTENT_FORMAT: None,
 }
 
 _CODE_RE = re.compile(r"^([a-z][a-z0-9_]*)(?: L\d+)?:")
 _OMITTED_RE = re.compile(r"^([a-z][a-z0-9_]*): 그 밖 (\d+)건 생략$")
 _SHA_RE = re.compile(r"^[0-9a-f]{64}$")
-# 문자열 안 JSON 텍스트의 "...token": 키(잘린 응답 원문도 잡는다)
-_TOKEN_TEXT_RE = re.compile(r'"[^"\\]*token"\s*:', re.IGNORECASE)
+# 비밀 키 이름 끝(대소문자 무시). 명세 8 safety: token·authorization 키가 없어야 한다
+SECRET_KEY_SUFFIXES = ("token", "authorization")
+# 문자열 안 JSON 텍스트의 "...token": / "...authorization": 키(잘린 응답 원문도 잡는다)
+_SECRET_TEXT_RE = re.compile(r'"[^"\\]*(?:token|authorization)"\s*:', re.IGNORECASE)
 
 
 # ---------------------------------------------------------------- 공개 함수
@@ -189,15 +194,16 @@ def parse_k6log(
     summary: Mapping[str, Any] | None = None,
     expected_sha256: str | None = None,
 ) -> K6Log:
-    """orders.jsonl(.gz)을 엄격하게 읽어 K6Log를 만든다(설계 4.6, 5.3).
+    """orders.jsonl(.gz, JSONL v2)을 엄격하게 읽어 K6Log를 만든다(설계 4.6, 5.3, 명세 2).
 
     path_or_lines: 파일 경로(str·PathLike), 파일 바이트, 또는 줄 목록(str·bytes).
       gzip 매직(1f 8b)이면 압축을 푼다. 줄 목록이면 sha256은 줄마다 "\\n"을 붙인 바이트 기준이다.
-    summary: k6 handleSummary JSON. 주면 Counter 대 줄 수(counter_short)와 token 키도 본다.
+    summary: k6 handleSummary JSON. 주면 Counter 대 줄 수(counter_short)와 비밀 키도 본다.
     expected_sha256: fetch가 받은 sha256(sha256sum 출력 그대로도 된다). 다르면 sha_mismatch.
 
     줄 단위 문제는 problems에 남기고 계속 읽는다. 파일을 못 읽으면 InputError다.
-    has_token_key는 JSONL과 (주면) summary 어디든 'token'으로 끝나는 키가 있으면 True다.
+    has_token_key는 JSONL과 (주면) summary 어디든 'token'·'authorization'으로 끝나는
+    키가 있으면 True다. 계좌 목록은 K6Log가 intent에서 만든다(account 줄이 없다).
     """
     lines, sha, pre = _read_source(path_or_lines)
     p = _Parser()
@@ -206,6 +212,45 @@ def parse_k6log(
     for lineno, raw in enumerate(lines, start=1):
         p.feed(lineno, raw)
     return p.finish(sha=sha, summary=summary, expected_sha256=expected_sha256)
+
+
+def intent_issues(it: Intent, run_id: str | None = None) -> tuple[str, ...]:
+    """intent 형식 위반 설명(명세 2). 비면 위반 없음. 값은 넣지 않는다.
+
+    - body: JSON 객체여야 하고 client_order_id, user_id, market, side, volume이
+      비어 있지 않은 문자열이어야 한다(volume은 10진 문자열).
+    - key == body.client_order_id, acct == body.user_id(Intent.consistent).
+    - key 길이 ≤ 64(서비스 client_order_id 상한).
+    - run_id를 주면 key가 `k6-<run_id>-<vu>-<seq>`이고 그 vu가 intent.vu와 같아야 한다.
+    파서는 이 결과를 intent_format 문제로 표시만 한다. PROTOCOL 판정은 classify가 한다.
+    """
+    out: list[str] = []
+    body = it.body
+    if it.body_raw is not None and _raw_obj(it.body_raw) is None:
+        out.append("body 문자열이 JSON 객체가 아니다")
+    missing = [k for k in INTENT_BODY_FIELDS if k not in body]
+    if missing:
+        out.append("body 필드 없음: " + ", ".join(missing))
+    bad = [
+        k
+        for k in INTENT_BODY_FIELDS
+        if k in body and not (isinstance(body[k], str) and body[k])
+    ]
+    if bad:
+        out.append("body 값이 비어 있지 않은 문자열이 아니다: " + ", ".join(bad))
+    if "client_order_id" in body and body["client_order_id"] != it.key:
+        out.append("key ≠ body.client_order_id")
+    if "user_id" in body and body["user_id"] != it.acct:
+        out.append("acct ≠ body.user_id")
+    if len(it.key) > CLIENT_ORDER_ID_MAX:
+        out.append(f"key가 {CLIENT_ORDER_ID_MAX}자를 넘는다(길이 {len(it.key)})")
+    if run_id is not None:
+        m = run_key_re(run_id).fullmatch(it.key)
+        if m is None:
+            out.append("key가 k6-<run_id>-<vu>-<seq> 형식이 아니다")
+        elif int(m.group(1)) != it.vu:
+            out.append(f"key의 vu {int(m.group(1))}가 intent.vu {it.vu}와 다르다")
+    return tuple(out)
 
 
 def log_complete(
@@ -217,15 +262,16 @@ def log_complete(
     """기록 완전성(설계 5.3 log_complete).
 
     조건(LOG_COMPLETE_CONDITIONS 순서):
-    - lines_parsed: 모든 줄이 파싱되고 필드 검사를 통과했다.
-    - run_single: run 값이 하나다. run_start_one: run_start 줄이 정확히 1개다.
-    - records_consistent: intent·result 키 중복 없음, intent 없는 result 없음,
-      setup_done 1개, account 줄 수 = setup_done.accounts(이 모듈이 더한 조건).
+    - lines_parsed: 모든 줄이 파싱되고 필드 검사를 통과했다(v1 줄이 없다).
+    - run_single: run 값이 하나다(run_start와, run을 적은 다른 줄).
+    - run_start_one: run_start 줄이 정확히 1개다.
+    - records_consistent: intent·result 키 중복 없음, intent 없는 result 없음(이 모듈이 더한 조건).
     - counters: intent·result 줄 수 ≥ summary의 order_intents·order_results.
       summary가 없으면(OOM 등) 실패다.
     - sha256: sha_ok가 True다. None은 미검증으로 실패다(sha_matches()로 구한다).
     - k6_exit: 종료 코드가 0 또는 99다. None(모름)은 실패다.
 
+    token·authorization 키와 intent 형식 위반은 이 결과에 들어가지 않는다(safety·classify 몫).
     결과: 완전하면 PASS, 아니면 INCONCLUSIVE + SENT_LOG_INCOMPLETE. value는 bool.
     required=False다. verdict 집계에 직접 넣지 않고 ORPHAN·unresolved 기준을 낮추는 데 쓴다.
     LOST·MISMATCH·중복은 있는 줄이 근거라 이 결과와 상관없이 판정한다(5.3).
@@ -321,10 +367,10 @@ def sha_matches(log: K6Log, expected: str | None) -> bool:
 
 
 def find_token_keys(obj: Any, prefix: str = "$") -> tuple[str, ...]:
-    """'token'으로 끝나는 키(대소문자 무시)의 경로(설계 5.6 safety, 7.4).
+    """'token'·'authorization'으로 끝나는 키(대소문자 무시)의 경로(명세 8 safety, 설계 7.4).
 
-    중첩 객체·배열을 모두 보고, 문자열 안 JSON 텍스트의 "...token": 키도 찾는다
-    (응답 원문 raw, 본문 문자열 body). 값은 돌려주지 않는다.
+    중첩 객체·배열을 모두 보고, 문자열 안 JSON 텍스트의 "...token":·"...authorization":
+    키도 찾는다(응답 원문 raw, 본문 문자열 body, 깨진 summary 원문). 값은 돌려주지 않는다.
     """
     out: list[str] = []
     _walk_tokens(obj, prefix, out)
@@ -446,20 +492,16 @@ class _Parser:
         self.line_count = 0
         self.runs: dict[str, int] = {}  # run 값 → 처음 나온 줄
         self.run_start: RunStart | None = None
-        self.setup_done: SetupDone | None = None
-        self.accounts: list[AccountRec] = []
-        self._acct_ids: set[str] = set()
-        self._acct_idx: set[int] = set()
         self.intents: dict[str, Intent] = {}
+        self._intent_line: dict[str, int] = {}
         self.results: dict[str, Result] = {}
         self._result_line: dict[str, int] = {}
         self.has_token_key = False
         self._handlers: dict[str, Callable[[dict[str, Any], Soft], None]] = {
-            KIND_RUN_START: self._on_run_start,
-            KIND_ACCOUNT: self._on_account,
-            KIND_SETUP_DONE: self._on_setup_done,
-            KIND_INTENT: self._on_intent,
-            KIND_RESULT: self._on_result,
+            TYPE_RUN_START: self._on_run_start,
+            TYPE_INTENT: self._on_intent,
+            TYPE_RESULT: self._on_result,
+            TYPE_RUN_END: self._on_run_end,
         }
         self._lineno = 0
 
@@ -493,41 +535,58 @@ class _Parser:
         paths = find_token_keys(obj)
         if paths:
             self.has_token_key = True
-            self.problem(TOKEN_KEY, f"'token' 키가 있다({_paths(paths)})", lineno)
+            self.problem(TOKEN_KEY, f"비밀 키가 있다({_paths(paths)})", lineno)
 
         if not isinstance(obj, dict):
             self.problem(NOT_OBJECT, f"JSON 객체가 아니다({_desc(obj)})", lineno)
             return
-        if "kind" not in obj:
-            self.problem(MISSING_FIELD, "필드가 없다: kind", lineno)
+        if V1_TYPE_FIELD in obj:
+            self.problem(
+                BAD_VERSION,
+                f"v1 줄(kind 필드)은 읽지 않는다(v{JSONL_VERSION}은 type)",
+                lineno,
+            )
             return
-        kind = obj["kind"]
-        if not isinstance(kind, str) or not kind:
-            self.problem(BAD_FIELD, f"kind가 문자열이 아니다({_desc(kind)})", lineno)
+        if TYPE_FIELD not in obj:
+            self.problem(MISSING_FIELD, f"필드가 없다: {TYPE_FIELD}", lineno)
             return
-        self.kind_counts[kind] += 1
-        if kind.startswith(WS_KIND_PREFIXES):
+        typ = obj[TYPE_FIELD]
+        if not isinstance(typ, str) or not typ:
+            self.problem(BAD_FIELD, f"type이 문자열이 아니다({_desc(typ)})", lineno)
             return
-        handler = self._handlers.get(kind)
+        self.kind_counts[typ] += 1
+        if typ.startswith(WS_TYPE_PREFIXES):
+            return
+        if typ in V1_TYPES:
+            self.problem(
+                BAD_VERSION, f"v1 줄 종류 {typ!r}는 v{JSONL_VERSION}에 없다", lineno
+            )
+            return
+        handler = self._handlers.get(typ)
         if handler is None:
-            self.problem(UNKNOWN_KIND, f"모르는 kind {_clip(kind)!r}", lineno)
+            self.problem(UNKNOWN_TYPE, f"모르는 type {_clip(typ)!r}", lineno)
             return
 
         soft: Soft = []
         try:
-            _require(obj, ("run",))
-            run = _str(obj["run"], "run")
-            self.runs.setdefault(run, lineno)
             handler(obj, soft)
         except _Bad as e:
-            self.problem(e.code, e.msg, lineno)
+            self.problem(e.code, e.msg, lineno)  # 버린 줄은 soft 문제를 남기지 않는다
+            return
         for code, msg in soft:
             self.problem(code, msg, lineno)
 
-    # -- kind별
+    def _opt_run(self, o: Mapping[str, Any]) -> None:
+        """run_start 밖의 줄은 run이 없어도 된다. 있으면 run_single 검사에 넣는다."""
+        if "run" in o:
+            self.runs.setdefault(_str(o["run"], "run"), self._lineno)
+
+    # -- type별
 
     def _on_run_start(self, o: dict[str, Any], soft: Soft) -> None:
         _require(o, RUN_START_FIELDS)
+        run = _str(o["run"], "run")
+        self.runs.setdefault(run, self._lineno)  # 버전이 틀려도 run 값은 센다
         v = _int(o["v"], "v")
         if v != JSONL_VERSION:
             raise _Bad(BAD_VERSION, f"JSONL v{v}는 읽지 않는다(v{JSONL_VERSION}만)")
@@ -535,51 +594,32 @@ class _Parser:
         seed = _int(o["seed"], "seed")
         profile = _str(o["profile"], "profile")
         t = _epoch_ms(o["t"], "t")
+        known = {TYPE_FIELD, *RUN_START_FIELDS, *RUN_START_OPTIONAL}
         rs = RunStart(
             v=v,
-            run=o["run"],
+            run=run,
             script_ver=script_ver,
             seed=seed,
             profile=profile,
             plan=_plan(o["plan"], soft),
             symbols=_symbols(o["symbols"], soft),
             initial_cash=_initial_cash(o["initial_cash"], soft),
-            conn_reuse=_conn_reuse(o["conn_reuse"], soft),
+            conn_reuse=_conn_reuse(o.get("conn_reuse"), soft),
+            vus=_vus(o["vus"], soft),
             t=t,
-            extra={
-                k: o[k] for k in sorted(o) if k != "kind" and k not in RUN_START_FIELDS
-            },
+            extra={k: o[k] for k in sorted(o) if k not in known},
         )
         if self.run_start is None:
             self.run_start = rs
 
-    def _on_account(self, o: dict[str, Any], soft: Soft) -> None:
-        _require(o, ACCOUNT_FIELDS)
-        idx = _int(o["idx"], "idx", lo=0)
-        acct = _uuid(o["acct"], "acct")
-        nick = _str(o["nick"], "nick")
-        if idx in self._acct_idx or acct in self._acct_ids:
-            raise _Bad(DUP_ACCOUNT, f"계좌 idx {idx} 또는 같은 계좌 id가 이미 나왔다")
-        self._acct_idx.add(idx)
-        self._acct_ids.add(acct)
-        self.accounts.append(AccountRec(idx=idx, acct=acct, nick=nick))
-
-    def _on_setup_done(self, o: dict[str, Any], soft: Soft) -> None:
-        _require(o, SETUP_DONE_FIELDS)
-        sd = SetupDone(
-            accounts=_int(o["accounts"], "accounts", lo=0),
-            t=_epoch_ms(o["t"], "t"),
-        )
-        if self.setup_done is None:
-            self.setup_done = sd
-
     def _on_intent(self, o: dict[str, Any], soft: Soft) -> None:
         _require(o, INTENT_FIELDS)
+        self._opt_run(o)
         key = _str(o["key"], "key")
         acct = _str(o["acct"], "acct")
         vu = _int(o["vu"], "vu", lo=0)
         t = _epoch_ms(o["t"], "t")
-        body, body_raw = _body(o["body"], soft)
+        body, body_raw = _body(o["body"])
         it = Intent(key=key, acct=acct, vu=vu, t=t, body=body, body_raw=body_raw)
         prev = self.intents.get(key)
         if prev is not None:
@@ -589,27 +629,31 @@ class _Parser:
                 f"intent 키 {_clip(key)}가 이미 나왔다({same}). 첫 줄을 쓴다",
             )
         self.intents[key] = it
+        self._intent_line[key] = self._lineno
 
     def _on_result(self, o: dict[str, Any], soft: Soft) -> None:
+        old = [k for k in V1_RESULT_FIELDS if k in o]
+        if old:
+            raise _Bad(
+                BAD_VERSION,
+                f"v1 result 필드 {', '.join(old)}는 v{JSONL_VERSION}에 없다(atts에 합친다)",
+            )
         _require(o, RESULT_FIELDS)
+        self._opt_run(o)
         key = _str(o["key"], "key")
-        atts = _attempts(o["atts"], "atts")
-        lookup = _lookup(o["lookup"], soft)
-        ack = _ack(o["ack"], "ack")
-        resend = _resend(o["resend"], soft)
-        t = _epoch_ms(o["t"], "t")
-        first = next((a for a in atts if a.is_ack), None)
-        if ack is None and first is not None:
-            soft.append((BAD_FIELD, f"ack가 null인데 시도 n={first.n}이 {first.st}다"))
-        elif ack is not None and (first is None or ack.st != first.st):
-            soft.append((BAD_FIELD, f"ack.st {ack.st}가 첫 ACK 시도와 다르다"))
-        rs = Result(key=key, atts=atts, lookup=lookup, ack=ack, resend=resend, t=t)
+        atts = _attempts(o["atts"], "atts", soft)
         if key in self.results:
             raise _Bad(
                 DUP_RESULT, f"result 키 {_clip(key)}가 이미 나왔다. 첫 줄을 쓴다"
             )
-        self.results[key] = rs
+        self.results[key] = Result(key=key, atts=atts)
         self._result_line[key] = self._lineno
+
+    def _on_run_end(self, o: dict[str, Any], soft: Soft) -> None:
+        """run_end는 받기만 한다(필수 아님). run·t가 있으면 형식을 본다."""
+        self._opt_run(o)
+        if "t" in o:
+            _epoch_ms(o["t"], "t")
 
     # -- 마무리
 
@@ -620,20 +664,9 @@ class _Parser:
         summary: Mapping[str, Any] | None,
         expected_sha256: str | None,
     ) -> K6Log:
-        n_rs = self.kind_counts.get(KIND_RUN_START, 0)
+        n_rs = self.kind_counts.get(TYPE_RUN_START, 0)
         if n_rs != 1:
             self.problem(RUN_START_COUNT, f"run_start가 {n_rs}개다(1개여야 한다)")
-        n_sd = self.kind_counts.get(KIND_SETUP_DONE, 0)
-        if n_sd != 1:
-            self.problem(SETUP_DONE_COUNT, f"setup_done이 {n_sd}개다(1개여야 한다)")
-        if self.setup_done is not None:
-            n_acc = self.kind_counts.get(KIND_ACCOUNT, 0)
-            if n_acc != self.setup_done.accounts:
-                self.problem(
-                    ACCOUNT_COUNT,
-                    f"account 줄 {n_acc}개 ≠ setup_done.accounts "
-                    f"{self.setup_done.accounts}",
-                )
         if len(self.runs) > 1:
             seen = ", ".join(
                 f"{_clip(r, 40)!r}(L{n})" for r, n in sorted(self.runs.items())
@@ -645,11 +678,27 @@ class _Parser:
                     ORPHAN_RESULT, f"result 키 {_clip(key)}에 intent가 없다", lineno
                 )
 
+        if self.run_start is not None:
+            run_id: str | None = self.run_start.run
+        elif len(self.runs) == 1:
+            run_id = next(iter(self.runs))
+        else:
+            run_id = None
+
+        for key, it in self.intents.items():
+            issues = intent_issues(it, run_id)
+            if issues:
+                self.problem(
+                    INTENT_FORMAT,
+                    f"intent 키 {_clip(key)}: " + "; ".join(issues),
+                    self._intent_line[key],
+                )
+
         if summary is not None:
             paths = find_token_keys(summary)
             if paths:
                 self.has_token_key = True
-                self.problem(TOKEN_KEY, f"summary에 'token' 키가 있다({_paths(paths)})")
+                self.problem(TOKEN_KEY, f"summary에 비밀 키가 있다({_paths(paths)})")
             _, cprobs = _counter_check(summary, self.kind_counts)
             for code, msg in cprobs:
                 self.problem(code, msg)
@@ -667,18 +716,9 @@ class _Parser:
         for code in sorted(self._omitted):
             self.problems.append(f"{code}: 그 밖 {self._omitted[code]}건 생략")
 
-        if self.run_start is not None:
-            run_id: str | None = self.run_start.run
-        elif len(self.runs) == 1:
-            run_id = next(iter(self.runs))
-        else:
-            run_id = None
-
         return K6Log(
             run_id=run_id,
             run_start=self.run_start,
-            accounts=tuple(sorted(self.accounts, key=lambda a: (a.idx, a.acct))),
-            setup_done=self.setup_done,
             intents=dict(self.intents),
             results=dict(self.results),
             problems=tuple(self.problems),
@@ -797,6 +837,12 @@ def _opt_str(v: Any, name: str) -> str | None:
     raise _Bad(BAD_FIELD, f"{name}는 문자열 또는 null이어야 한다({_desc(v)})")
 
 
+def _opt_bool(v: Any, name: str) -> bool | None:
+    if v is None or isinstance(v, bool):
+        return v
+    raise _Bad(BAD_FIELD, f"{name}는 true·false·null이어야 한다({_desc(v)})")
+
+
 def _obj(v: Any, name: str) -> dict[str, Any]:
     if not isinstance(v, dict):
         raise _Bad(BAD_FIELD, f"{name}는 객체여야 한다({_desc(v)})")
@@ -811,109 +857,77 @@ def _list(v: Any, name: str, *, nonempty: bool = False) -> list[Any]:
     return v
 
 
-def _uuid(v: Any, name: str) -> str:
-    s = _str(v, name)
-    try:
-        canon = str(uuid.UUID(s))
-    except ValueError:
-        canon = ""
-    if canon != s:
-        raise _Bad(BAD_FIELD, f"{name}가 정규 UUID 형식(소문자, 하이픈)이 아니다")
-    return s
-
-
 def _ec(v: Any, name: str) -> str | None:
+    """거절 reason 또는 k6 error_code. 정수(k6 error_code)는 문자열로 바꾼다."""
     if v is None or isinstance(v, str):
         return v
     if _plain_int(v):
         return str(v)
-    if isinstance(v, Decimal) and v == v.to_integral_value():
+    if isinstance(v, Decimal) and v.is_finite() and v == v.to_integral_value():
         return str(int(v))
     raise _Bad(BAD_FIELD, f"{name}는 문자열·정수·null이어야 한다({_desc(v)})")
 
 
-def _attempt(v: Any, name: str) -> Attempt:
+def _attempt(v: Any, name: str, soft: Soft) -> Attempt:
+    """atts[] 원소 {n, t0, t1, st, ec, ms, rp, raw}(명세 2). 8개 키가 모두 있어야 한다.
+
+    rp·raw 일관성(200이 아닌데 rp가 있음, rp ≠ raw.replayed, raw 길이 초과)은 soft다.
+    """
     o = _obj(v, name)
     p = name + "."
     _require(o, ATTEMPT_FIELDS, p)
-    return Attempt(
+    a = Attempt(
         n=_int(o["n"], p + "n", lo=1),
         t0=_epoch_ms(o["t0"], p + "t0"),
         t1=_epoch_ms(o["t1"], p + "t1"),
         st=_int(o["st"], p + "st", lo=0, hi=599),
         ec=_ec(o["ec"], p + "ec"),
         ms=float(_num(o["ms"], p + "ms", lo=0)),
+        rp=_opt_bool(o["rp"], p + "rp"),
+        raw=_opt_str(o["raw"], p + "raw"),
     )
-
-
-def _attempts(v: Any, name: str) -> tuple[Attempt, ...]:
-    items = _list(v, name, nonempty=True)
-    return tuple(_attempt(a, f"{name}[{i}]") for i, a in enumerate(items))
-
-
-def _ack(v: Any, name: str) -> Ack | None:
-    if v is None:
-        return None
-    o = _obj(v, name)
-    _require(o, ("st", "raw"), name + ".")
-    return Ack(
-        st=_int(o["st"], name + ".st", lo=0, hi=599),
-        raw=_opt_str(o["raw"], name + ".raw"),
-    )
-
-
-def _lookup(v: Any, soft: Soft) -> Lookup | None:
-    if v is None:
-        return None
-    o = _obj(v, "lookup")
-    _require(o, ("atts", "st", "raw"), "lookup.")
-    lk = Lookup(
-        atts=_attempts(o["atts"], "lookup.atts"),
-        st=_int(o["st"], "lookup.st", lo=0, hi=599),
-        raw=_opt_str(o["raw"], "lookup.raw"),
-    )
-    if lk.st != lk.atts[-1].st:
-        soft.append((BAD_FIELD, f"lookup.st {lk.st}가 마지막 조회 시도와 다르다"))
-    return lk
-
-
-def _resend(v: Any, soft: Soft) -> Resend | None:
-    if v is None:
-        return None
-    o = _obj(v, "resend")
-    _require(o, ("atts", "ack"), "resend.")
-    atts = _attempts(o["atts"], "resend.atts")
-    ack = _ack(o["ack"], "resend.ack")
-    first = next((a for a in atts if 200 <= a.st < 300), None)
-    if ack is None and first is not None:
-        soft.append(
-            (BAD_FIELD, f"resend.ack가 null인데 시도 n={first.n}이 {first.st}다")
-        )
-    elif ack is not None and (first is None or ack.st != first.st):
-        soft.append((BAD_FIELD, f"resend.ack.st {ack.st}가 첫 2xx 시도와 다르다"))
-    return Resend(atts=atts, ack=ack)
-
-
-def _body(v: Any, soft: Soft) -> tuple[dict[str, Any], str | None]:
-    """intent body. JSON 문자열이면 풀고 원문을 둔다. 내용 문제는 soft로 남긴다."""
-    if isinstance(v, str):
-        raw: str | None = v
-        try:
-            b = _loads(v)
-        except (ValueError, RecursionError, _DupKey):
-            soft.append((BAD_FIELD, "body 문자열이 JSON이 아니다"))
-            return {}, raw
-        if not isinstance(b, dict):
-            soft.append((BAD_FIELD, f"body가 JSON 객체가 아니다({_desc(b)})"))
-            return {}, raw
-    elif isinstance(v, dict):
-        b, raw = v, None
+    if a.raw is not None and len(a.raw) > RAW_MAX:
+        soft.append((BAD_FIELD, f"{p}raw가 {RAW_MAX}자를 넘는다(길이 {len(a.raw)})"))
+    if a.st != ACK_STATUS:
+        if a.rp is not None:
+            soft.append((BAD_FIELD, f"{p}rp는 200 응답에만 쓴다(st {a.st})"))
     else:
-        raise _Bad(BAD_FIELD, f"body는 객체 또는 JSON 문자열이어야 한다({_desc(v)})")
-    missing = [k for k in BODY_FIELDS if k not in b]
-    if missing:
-        soft.append((BAD_FIELD, "body에 필드가 없다: " + ", ".join(missing)))
-    return dict(b), raw
+        body = a.json()
+        replayed = None if body is None else body.get(REPLAYED_FIELD)
+        if isinstance(replayed, bool) and a.rp is not replayed:
+            soft.append((BAD_FIELD, f"{p}rp {_desc(a.rp)}가 raw.replayed와 다르다"))
+    return a
+
+
+def _attempts(v: Any, name: str, soft: Soft) -> tuple[Attempt, ...]:
+    """시도 목록. 비어 있으면 버린다. n이 1부터 차례가 아니면 soft다."""
+    items = _list(v, name, nonempty=True)
+    atts = tuple(_attempt(a, f"{name}[{i}]", soft) for i, a in enumerate(items))
+    ns = [a.n for a in atts]
+    if ns != list(range(1, len(atts) + 1)):
+        soft.append((BAD_FIELD, f"{name}의 n이 1부터 차례가 아니다({_clip(str(ns))})"))
+    return atts
+
+
+def _raw_obj(text: str) -> dict[str, Any] | None:
+    """JSON 객체 텍스트를 푼다. 깨졌거나 객체가 아니거나 키가 겹치면 None."""
+    try:
+        v = _loads(text)
+    except (ValueError, RecursionError, _DupKey):
+        return None
+    return v if isinstance(v, dict) else None
+
+
+def _body(v: Any) -> tuple[dict[str, Any], str | None]:
+    """intent body. 객체면 그대로, JSON 문자열이면 풀고 원문을 둔다.
+
+    문자열이 JSON 객체가 아니면 빈 body로 두고 intent_issues가 표시한다.
+    """
+    if isinstance(v, dict):
+        return dict(v), None
+    if isinstance(v, str):
+        return _raw_obj(v) or {}, v
+    raise _Bad(BAD_FIELD, f"body는 객체 또는 JSON 문자열이어야 한다({_desc(v)})")
 
 
 def _plan(v: Any, soft: Soft) -> dict[str, Any]:
@@ -952,7 +966,7 @@ def _symbols(v: Any, soft: Soft) -> tuple[str, ...]:
 
 
 def _initial_cash(v: Any, soft: Soft) -> int | None:
-    """원 단위 정수. 숫자 문자열과 정수값 Decimal도 받는다. 틀리면 None."""
+    """원 단위 정수(참고용). 숫자 문자열과 정수값 Decimal도 받는다. 틀리면 None."""
     if v is None:
         return None
     if _plain_int(v) and v >= 0:
@@ -966,25 +980,38 @@ def _initial_cash(v: Any, soft: Soft) -> int | None:
 
 
 def _conn_reuse(v: Any, soft: Soft) -> bool | None:
-    """false가 아니면 FIRST_200을 낮춘다(4.4). 틀린 값은 None(재사용 가능)으로 둔다."""
+    """있어도 되고 판정에 쓰지 않는다(명세 2). 틀린 값은 None으로 둔다."""
     if v is None or isinstance(v, bool):
         return v
     soft.append((BAD_FIELD, f"conn_reuse는 true·false·null이어야 한다({_desc(v)})"))
     return None
 
 
+def _vus(v: Any, soft: Soft) -> int | None:
+    """VU 수(1 VU = 1 user). 1 이상 정수가 아니면 None."""
+    if _plain_int(v) and v >= 1:
+        return v
+    soft.append((BAD_FIELD, f"vus는 1 이상 정수여야 한다({_desc(v)})"))
+    return None
+
+
+def _is_secret_key(k: Any) -> bool:
+    return isinstance(k, str) and k.lower().endswith(SECRET_KEY_SUFFIXES)
+
+
 def _walk_tokens(obj: Any, path: str, out: list[str]) -> None:
     if isinstance(obj, dict):
         for k, v in obj.items():
             p = f"{path}.{k}"
-            if isinstance(k, str) and k.lower().endswith("token"):
+            if _is_secret_key(k):
                 out.append(p)
             _walk_tokens(v, p, out)
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
             _walk_tokens(v, f"{path}[{i}]", out)
     elif isinstance(obj, str):
-        if "token" in obj.lower() and _TOKEN_TEXT_RE.search(obj):
+        low = obj.lower()
+        if ("token" in low or "authorization" in low) and _SECRET_TEXT_RE.search(obj):
             out.append(f"{path}(텍스트)")
 
 
@@ -1020,8 +1047,8 @@ def _counter_check(
 ) -> tuple[dict[str, Any], list[tuple[str, str]]]:
     """(detail, [(문제 코드, 설명)]). 줄 수 ≥ Counter면 문제가 없다(설계 5.3)."""
     detail: dict[str, Any] = {
-        "intent_lines": kind_counts.get(KIND_INTENT, 0),
-        "result_lines": kind_counts.get(KIND_RESULT, 0),
+        "intent_lines": kind_counts.get(TYPE_INTENT, 0),
+        "result_lines": kind_counts.get(TYPE_RESULT, 0),
         COUNTER_INTENTS: None,
         COUNTER_RESULTS: None,
     }
@@ -1033,13 +1060,13 @@ def _counter_check(
     if metrics is None:
         probs.append((SUMMARY_INVALID, "summary에 metrics가 없다"))
         return detail, probs
-    for kind, metric in _COUNTERS:
-        lines = kind_counts.get(kind, 0)
+    for typ, metric in _COUNTERS:
+        lines = kind_counts.get(typ, 0)
         if metric not in metrics:
             # k6는 표본이 없는 지표를 빼므로, 줄이 없을 때만 0으로 본다.
             if lines > 0:
                 probs.append(
-                    (SUMMARY_INVALID, f"summary에 {metric}가 없다({kind} 줄 {lines}개)")
+                    (SUMMARY_INVALID, f"summary에 {metric}가 없다({typ} 줄 {lines}개)")
                 )
             else:
                 detail[metric] = 0
@@ -1050,7 +1077,7 @@ def _counter_check(
             continue
         detail[metric] = c
         if lines < c:
-            probs.append((COUNTER_SHORT, f"{kind} 줄 {lines}개 < {metric} {c}"))
+            probs.append((COUNTER_SHORT, f"{typ} 줄 {lines}개 < {metric} {c}"))
     return detail, probs
 
 

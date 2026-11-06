@@ -498,8 +498,8 @@ def k6_exit_to_checks(
       아니면 LOAD_ABORTED.
     - None(종료 코드 모름) → INCONCLUSIVE(NOT_EVALUATED). 그 밖(OOM 137 등) → LOAD_ABORTED.
 
-    plan_duration_ms는 stage 합이다. testRunDurationMs는 setup 시간을 포함하므로 setup_ms
-    (setup_done.t − run_start.t)를 주면 중단 판별이 더 정확해진다.
+    plan_duration_ms는 stage 합이다. testRunDurationMs는 setup 시간을 포함하므로 setup_ms를
+    주면 중단 판별이 더 정확해진다. JSONL v2에는 setup_done이 없어 pipeline은 0(하한)을 준다.
     """
     spec = spec or {"id": "k6_exit", "kind": "k6"}
     item_id, kind, required, on_violation = _spec_common({"kind": "k6", **spec})

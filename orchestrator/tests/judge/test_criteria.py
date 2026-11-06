@@ -1,7 +1,8 @@
-"""판정 기준 병합·검증(설계 6)."""
+"""판정 기준 병합·검증(설계 6, 계약 정렬 명세 9)."""
 
 import hashlib
 import textwrap
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -11,10 +12,16 @@ from orchestrator.judge.criteria import (
     duration_ms,
     integrity_cfg,
     load_criteria,
+    safety_cfg,
     write_resolved,
 )
 from orchestrator.judge.errors import InputError
-from orchestrator.judge.model import IntegrityCfg
+from orchestrator.judge.model import (
+    DEFAULT_RESPONSE_FIELDS,
+    INVARIANTS,
+    IntegrityCfg,
+    SafetyCfg,
+)
 
 REPO = Path(__file__).resolve().parents[3]
 CRITERIA_DIR = REPO / "experiments" / "criteria"
@@ -27,13 +34,13 @@ CRITERIA_FILES = [
 
 BASE = """\
 schema_version: 1
-safety: {symbol_prefix: "REPLAY:UPBIT:", account_mode: replay}
+safety: {markets: [KRW-BTC], user_pattern: '^user-[0-9]{4}$'}
 phases: {warmup: 60s, baseline: {before: inject_start, duration: 150s, guard: 2s},
          fault: {from: inject_start, to: inject_end, extra: 60s},
          tail: {before: k6_end, duration: 120s}}
 coverage: {min_filled: {baseline: 100, tail: 100}, min_sell_filled: 20, min_achieved_ratio: 0.98}
-integrity: {response_fields: {status: status, reject_reason: reason, price: price, fee: fee},
-            response_fields_confirmed: false, price_max_age_ms: 60000}
+integrity: {response_fields: {order_id: id, status: status, fill_price: fill_price},
+            response_fields_confirmed: false}
 guards: [{id: safety}, {id: fault_effect}]
 checks:
   - {id: lost, kind: integrity, class: [LOST], op: '==', value: 0}
@@ -82,8 +89,7 @@ def test_default_contents():
         "duplicates",
         "orphans",
         "invariants",
-        "i7_stale_fill",
-        "arithmetic",
+        "stale_fill",
         "protocol",
         "order_p95_k6",
         "order_err_k6",
@@ -102,7 +108,17 @@ def test_default_contents():
     assert c.fault_effect == ()
     assert c.item("lost")["required"] is True
     assert c.item("lost")["on_violation"] == "fail"
-    assert c.item("arithmetic")["required"] is False
+    assert c.item("lost")["class"] == ["LOST", "REJECT_COMMITTED"]
+    assert c.item("mismatch")["class"] == ["MISMATCH", "BODY_MISMATCH"]
+    assert c.item("duplicates")["class"] == [
+        "DUP_ORDER",
+        "FILL_STATE",
+        "IDEMPOTENCY_VIOLATION",
+    ]
+    assert c.item("invariants")["sql"] == list(INVARIANTS)
+    assert c.item("invariants")["required"] is True
+    assert c.item("stale_fill")["check"] == "fresh"
+    assert c.item("stale_fill")["required"] is False
     assert c.item("protocol")["on_violation"] == "inconclusive"
     assert c.item("safety")["on_violation"] == "inconclusive"
     assert c.item("safety")["kind"] == "guard"
@@ -113,8 +129,11 @@ def test_default_contents():
 def test_pod_kill_contents():
     c = load_criteria(CRITERIA_DIR / "order-api-pod-kill.yaml")
     assert ids(c.checks)[-2:] == ["unresolved_zero", "order_recovery_k6"]
-    assert ids(c.fault_effect) == ["pod_replaced"]
+    assert ids(c.fault_effect) == ["pod_replaced", "shutdown_seen_by_k6"]
     assert c.item("pod_replaced")["on_violation"] == "inconclusive"
+    seen = c.item("shutdown_seen_by_k6")
+    assert seen["class_sub"] == ["not_committed", "after_503"]
+    assert seen["required"] is False and seen["account"] == "any"
     assert c.item("order_recovery_k6")["required"] is False
     assert "op" not in c.item("order_recovery_k6")
 
@@ -126,11 +145,11 @@ def test_crash_after_commit_contents():
         "order-api-pod-kill.yaml",
         "order-api-crash-after-commit.yaml",
     )
-    assert c.disabled == ("pod_replaced", "unresolved_zero")
+    assert c.disabled == ("pod_replaced", "shutdown_seen_by_k6", "unresolved_zero")
     assert c.item("unresolved_zero") is None
     assert c.item("pod_replaced") is None
     assert ids(c.fault_effect) == ["crash_restart", "crash_seen_by_k6"]
-    assert c.item("crash_seen_by_k6")["class_sub"] == ["after_commit", "lookup"]
+    assert c.item("crash_seen_by_k6")["class_sub"] == ["after_commit"]
     assert c.item("crash_seen_by_k6")["account"] == "idx0"
     assert c.item("order_recovery_k6") is not None  # pod-kill에서 상속
     assert ids(c.checks)[-1] == "unresolved_committed"
@@ -151,15 +170,73 @@ def test_demo_min_field_level_override():
 def test_integrity_cfg():
     cfg = integrity_cfg(load_criteria(CRITERIA_DIR / "default.yaml"))
     assert cfg == IntegrityCfg(
-        response_fields={
-            "fee": "fee",
-            "price": "price",
-            "reject_reason": "reason",
-            "status": "status",
-        },
-        response_fields_confirmed=False,
-        price_max_age_ms=60000,
+        response_fields=dict(DEFAULT_RESPONSE_FIELDS),
+        response_fields_confirmed=True,
+        initial_krw=Decimal("10000000"),
+        stale_ms=5000,
     )
+    assert dict(cfg.response_fields) == DEFAULT_RESPONSE_FIELDS
+    assert list(cfg.response_fields) == sorted(cfg.response_fields)
+
+
+def test_safety_cfg():
+    cfg = safety_cfg(load_criteria(CRITERIA_DIR / "default.yaml"))
+    assert cfg == SafetyCfg(
+        markets=("KRW-BTC",), user_pattern="^user-[0-9]{4}$", user_max=1000
+    )
+    assert cfg.user_ok("user-0001") and not cfg.user_ok("presenter")
+    assert not cfg.user_ok("user-1001")  # 명세 11 범위
+
+
+def test_safety_user_max_default_and_override(tmp_path):
+    """명세 11: safety.user_max는 없으면 1000을 채워 resolved에 남기고, 덮어쓸 수 있다."""
+    c = load_criteria(put(tmp_path, "c.yaml", BASE))
+    assert c.data["safety"]["user_max"] == 1000
+    assert "user_max: 1000" in c.text
+    child = put(tmp_path, "child.yaml", "extends: c.yaml\nsafety: {user_max: 300}\n")
+    cfg = safety_cfg(load_criteria(child))
+    assert cfg.user_max == 300
+    assert cfg.user_ok("user-0300") and not cfg.user_ok("user-0301")
+
+
+def test_integrity_defaults_filled(tmp_path):
+    """initial_krw·stale_ms가 없으면 기본값을 채워 resolved에 남긴다."""
+    c = load_criteria(put(tmp_path, "c.yaml", BASE))
+    assert c.data["integrity"]["initial_krw"] == "10000000"
+    assert c.data["integrity"]["stale_ms"] == 5000
+    assert "initial_krw: '10000000'" in c.text
+    cfg = integrity_cfg(c)
+    assert cfg.initial_krw == Decimal("10000000") and cfg.stale_ms == 5000
+
+
+def test_initial_krw_int_and_str_hash_same(tmp_path):
+    put(tmp_path, "base.yaml", BASE)
+    a = put(tmp_path, "a.yaml", "extends: base.yaml\nintegrity: {initial_krw: 5000}\n")
+    b = put(
+        tmp_path, "b.yaml", 'extends: base.yaml\nintegrity: {initial_krw: "5000"}\n'
+    )
+    ca, cb = load_criteria(a), load_criteria(b)
+    assert ca.sha256 == cb.sha256
+    assert integrity_cfg(ca).initial_krw == Decimal("5000")
+    frac = put(
+        tmp_path, "f.yaml", 'extends: base.yaml\nintegrity: {initial_krw: "0.5000"}\n'
+    )
+    assert integrity_cfg(load_criteria(frac)).initial_krw == Decimal("0.5")
+
+
+@pytest.mark.parametrize(
+    "patch, old",
+    [
+        ('safety: {symbol_prefix: "KRW-"}\n', "symbol_prefix"),
+        ("safety: {account_mode: replay}\n", "account_mode"),
+        ("integrity: {price_max_age_ms: 60000}\n", "price_max_age_ms"),
+    ],
+)
+def test_old_contract_keys_rejected(tmp_path, patch, old):
+    put(tmp_path, "base.yaml", BASE)
+    child = put(tmp_path, "child.yaml", "extends: base.yaml\n" + patch)
+    with pytest.raises(InputError, match=f"옛 계약 키.*{old}"):
+        load_criteria(child)
 
 
 def test_resolved_text_sorted_and_flat():
@@ -193,7 +270,7 @@ def test_map_deep_merge(tmp_path):
     assert c.data["coverage"]["min_filled"] == {"baseline": 100, "tail": 5, "steady": 7}
     assert c.data["coverage"]["min_sell_filled"] == 20
     assert c.data["integrity"]["response_fields_confirmed"] is True
-    assert c.data["integrity"]["response_fields"]["reject_reason"] == "reason"
+    assert c.data["integrity"]["response_fields"]["order_id"] == "id"
 
 
 def test_map_replace(tmp_path):
@@ -227,7 +304,7 @@ def test_items_field_merge_append_and_replace(tmp_path):
         extends: base.yaml
         checks:
           - {id: p95, value: 500}
-          - {id: lost, replace: true, kind: integrity, sql: [i2], op: '==', value: 0}
+          - {id: lost, replace: true, kind: integrity, sql: [cash], op: '==', value: 0}
           - {id: new_one, kind: unresolved, class: [PROTOCOL], op: '==', value: 0}
         """,
     )
@@ -238,7 +315,7 @@ def test_items_field_merge_append_and_replace(tmp_path):
     assert c.item("lost") == {
         "id": "lost",
         "kind": "integrity",
-        "sql": ["i2"],
+        "sql": ["cash"],
         "op": "==",
         "value": 0,
         "required": True,
@@ -316,12 +393,19 @@ def test_missing_parent(tmp_path):
         "integrity: {foo: 1}\n",  # 모르는 하위 키
         "phases: {fault: {extra: 1m, until: x}}\n",
         "schema_version: 2\n",
-        "checks: [{id: lost, kind: integrity, class: [LOST], sql: [i2]}]\n",  # class와 sql 둘 다
+        "checks: [{id: lost, kind: integrity, class: [LOST], sql: [cash]}]\n",  # class와 sql 둘 다
         "checks: [{id: x1, kind: integrity, op: '==', value: 0}]\n",  # class|sql|check 없음
         "checks: [{id: x1, kind: integrity, class: [LOST]}]\n",  # op·value 없음
         "checks: [{id: x1, kind: integrity, class: [LOSTT], op: '==', value: 0}]\n",
         "checks: [{id: x1, kind: integrity, sql: [i99], op: '==', value: 0}]\n",
-        "checks: [{id: x1, kind: integrity, check: i8, op: '==', value: 0}]\n",
+        "checks: [{id: x1, kind: integrity, sql: [i2], op: '==', value: 0}]\n",  # 옛 SQL
+        "checks: [{id: x1, kind: integrity, sql: [privileges], op: '==', value: 0}]\n",
+        "checks: [{id: x1, kind: integrity, sql: [fresh], op: '==', value: 0}]\n",  # check다
+        "checks: [{id: x1, kind: integrity, check: i7, op: '==', value: 0}]\n",  # 옛 I7
+        "checks: [{id: x1, kind: integrity, check: cash, op: '==', value: 0}]\n",  # sql이다
+        "checks: [{id: x1, kind: integrity, class: [PHANTOM_ACK], op: '==', value: 0}]\n",
+        "checks: [{id: x1, kind: integrity, class: [DUP_FILL], op: '==', value: 0}]\n",
+        "checks: [{id: x1, kind: unresolved, class: [NOT_ENTERED], op: '==', value: 0}]\n",
         "checks: [{id: x1, kind: integrity, class: [LOST], op: '=', value: 0}]\n",
         "checks: [{id: x1, kind: integrity, class: [LOST], op: '==', value: zero}]\n",
         "checks: [{id: x1, kind: integrity, class: [LOST], op: '==', value: 0, stat: x}]\n",
@@ -344,13 +428,41 @@ def test_missing_parent(tmp_path):
         "fault_effect: [{id: f1, observe: pod_replaced}]\n",  # target 없음
         "fault_effect: [{id: f1, observe: node_drain, target: x}]\n",
         "fault_effect: [{id: f1, target: x}]\n",  # observe|class_sub 없음
-        "fault_effect: [{id: f1, observe: crash_restart, target: x, class_sub: [lookup]}]\n",
-        "fault_effect: [{id: f1, class_sub: [lookup]}]\n",  # op·value 없음
+        "fault_effect: [{id: f1, observe: crash_restart, target: x, class_sub: [clean]}]\n",
+        "fault_effect: [{id: f1, class_sub: [after_commit]}]\n",  # op·value 없음
         "fault_effect: [{id: f1, class_sub: [clean2], op: '>=', value: 1}]\n",
-        "fault_effect: [{id: f1, class_sub: [lookup], op: '>=', value: 1, account: idxA}]\n",
+        "fault_effect: [{id: f1, class_sub: [lookup], op: '>=', value: 1}]\n",  # 옛 세부
+        "fault_effect: [{id: f1, class_sub: [clean], op: '>=', value: 1, account: idxA}]\n",
         "fault_effect: [{id: f1, observe: crash_restart, target: x, within_s: 0}]\n",
         "require_extra_accounts: yes please\n",
         "disable: lost\n",
+        # safety(명세 8)
+        "safety: {markets: []}\n",
+        "safety: {markets: KRW-BTC}\n",
+        "safety: {markets: [KRW-BTC, KRW-BTC]}\n",
+        "safety: {markets: ['KRW BTC']}\n",
+        "safety: {user_pattern: '('}\n",
+        "safety: {user_pattern: ''}\n",
+        "safety: {user_pattern: 5}\n",
+        "safety: {user_max: 0}\n",  # 명세 11 범위 1..user_max
+        "safety: {user_max: '1000'}\n",
+        "safety: {user_max: true}\n",
+        "safety: {replace: true, markets: [KRW-BTC]}\n",  # user_pattern 없음
+        # integrity(명세 5, 7)
+        "integrity: {initial_krw: 1.5}\n",  # float 금액
+        "integrity: {initial_krw: true}\n",
+        "integrity: {initial_krw: '-1'}\n",
+        "integrity: {initial_krw: '1.00001'}\n",  # NUMERIC(24,4)보다 잘다
+        "integrity: {initial_krw: abc}\n",
+        "integrity: {initial_krw: 'NaN'}\n",
+        "integrity: {stale_ms: 0}\n",
+        "integrity: {stale_ms: 5s}\n",
+        "integrity: {response_fields: {order_id: fill_id}}\n",  # orders 열이 아님
+        "integrity: {response_fields: {replayed: status}}\n",  # 분류 입력
+        "integrity: {response_fields: {reason: status}}\n",
+        "integrity: {response_fields: {Bad-Field: id}}\n",
+        "integrity: {response_fields: {replace: true}}\n",  # 빈 매핑
+        "integrity: {response_fields: [id]}\n",
     ],
 )
 def test_rejects(tmp_path, patch):

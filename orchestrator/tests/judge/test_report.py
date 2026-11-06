@@ -1,4 +1,4 @@
-"""report.md 조각(설계 5.8, 9 시연 최소선)."""
+"""report.md 조각(설계 5.8, 9 시연 최소선, 계약 정렬 명세 4·7 이름)."""
 
 from decimal import Decimal
 
@@ -15,16 +15,13 @@ RUN_SHA = "a" * 64
 EVID_SHA = "e" * 64
 
 CLEAN_INVARIANTS = {
-    "i2": 0,
-    "nulls": 0,
+    "cash": 0,
+    "qty": 0,
+    "avg": 0,
+    "nonneg": 0,
+    "arith": 0,
     "constraints": 0,
-    "i4": 0,
-    "i5_cash": 0,
-    "i5_qty": 0,
-    "i5_flat": 0,
-    "i6_db": 0,
-    "i8": 0,
-    "i7": 0,
+    "fresh": 0,
 }
 
 
@@ -56,7 +53,13 @@ def verdict(**kw):
             "intents": {"total": 27000, "ack": 26990},
             "log_complete": True,
             "classes": {"OK": 26990, "UNRESOLVED_ABSENT": 10},
-            "subs": {"clean": 26980, "after_commit": 7, "lookup": 2, "after_503": 0},
+            "subs": {
+                "clean": 26980,
+                "after_commit": 7,
+                "not_committed": 2,
+                "after_503": 0,
+                "rejected": 1,
+            },
             "invariants": dict(CLEAN_INVARIANTS),
         },
         client={
@@ -101,15 +104,14 @@ def test_counts_follow_term_mapping():
             "intents": {"total": 10, "ack": 9},
             "classes": {
                 "LOST": 1,
-                "PHANTOM_ACK": 1,
-                "FALSE_NOT_FOUND": 1,
+                "REJECT_COMMITTED": 2,
                 "MISMATCH": 2,
                 "DUP_ORDER": 1,
                 "IDEMPOTENCY_VIOLATION": 3,
                 "ORPHAN": 4,
                 "INTERRUPTED": 5,
             },
-            "invariants": {**CLEAN_INVARIANTS, "i2": 1, "i5_cash": 2, "i7": 3},
+            "invariants": {**CLEAN_INVARIANTS, "cash": 1, "avg": 2, "fresh": 3},
         },
         checks=checks(CheckResult(id="dup", kind="integrity", outcome=FAIL, value=4)),
     )
@@ -123,7 +125,7 @@ def test_not_evaluated_classes_are_not_shown_as_counts():
     """평가하지 않은 클래스(integrity.not_evaluated)는 확정 값처럼 쓰지 않는다(설계 5.3, 5.7)."""
     v = verdict(
         integrity={
-            "classes": {"OK": 8, "FALSE_NOT_FOUND": 1, "ORPHAN": 1},
+            "classes": {"OK": 8, "REJECT_COMMITTED": 1, "ORPHAN": 1},
             "invariants": dict(CLEAN_INVARIANTS),
             "not_evaluated": {
                 "LOST": R.ACCOUNT_SET_MISMATCH,
@@ -138,7 +140,10 @@ def test_not_evaluated_classes_are_not_shown_as_counts():
         "유실 ≥1(ACCOUNT_SET_MISMATCH) · 불일치 0 · 중복 0 · 고아 ?(SENT_LOG_INCOMPLETE)"
     )
     assert "| 고아(ORPHAN) | ?(SENT_LOG_INCOMPLETE) |" in text
-    assert "| 미확정·미진입(사용자 영향) | ?(SENT_LOG_INCOMPLETE) |" in text
+    assert (
+        "| 결과 불명·중단(사용자 영향: UNRESOLVED_COMMITTED+UNRESOLVED_ABSENT+INTERRUPTED)"
+        " | ?(SENT_LOG_INCOMPLETE) |"
+    ) in text
     star = verdict(
         integrity={"classes": None, "not_evaluated": {"*": R.DB_ERROR}},
     )
@@ -146,18 +151,18 @@ def test_not_evaluated_classes_are_not_shown_as_counts():
 
 
 def test_unknown_values_are_question_marks():
-    v = verdict(integrity={"classes": {"OK": 1}, "invariants": {"i2": 0}})
+    v = verdict(integrity={"classes": {"OK": 1}, "invariants": {"cash": 0}})
     first = fragment(v).splitlines()[0]
     assert "잔고 불일치 ?" in first and "신선도 위반 체결 ?" in first
     assert first.startswith("유실 0 · 불일치 0")
 
 
 def test_stale_fill_falls_back_to_check_value():
-    inv = {k: v for k, v in CLEAN_INVARIANTS.items() if k != "i7"}
+    inv = {k: v for k, v in CLEAN_INVARIANTS.items() if k != "fresh"}
     v = verdict(
         integrity={"classes": {}, "invariants": inv},
         checks=checks(
-            CheckResult(id="i7_stale_fill", kind="integrity", outcome=FAIL, value=2)
+            CheckResult(id="stale_fill", kind="integrity", outcome=FAIL, value=2)
         ),
     )
     assert "신선도 위반 체결 2 → FAIL" in fragment(v).splitlines()[0]
@@ -166,13 +171,18 @@ def test_stale_fill_falls_back_to_check_value():
 def test_core_sections_present():
     text = fragment(verdict())
     for phrase in (
-        "커밋 후 회수 9건(after_commit 7, lookup 2)",
+        "커밋 후 회수 7건(after_commit)",
         "## 판정: PASS",
         "| 의도(intent) | 27000 |",
-        "| ACK(200·201) | 26990 |",
-        "유실(LOST+PHANTOM_ACK+FALSE_NOT_FOUND)",
-        "잔고 불일치(i2 0, i5_cash 0, i5_qty 0, i5_flat 0)",
-        "신선도 위반 체결(I7)",
+        "| ACK(200, order_id) | 26990 |",
+        "| 유실(LOST+REJECT_COMMITTED) | 0 |",
+        "| 내용 불일치(MISMATCH+BODY_MISMATCH) | 0 |",
+        "| 중복(DUP_ORDER+FILL_STATE+IDEMPOTENCY_VIOLATION) | 0 |",
+        "잔고 불일치(cash 0, qty 0, avg 0)",
+        "신선도 위반 체결(fresh)",
+        "그 밖 불변식: arith 0, constraints 0, nonneg 0",
+        "| not_committed | 2 |",
+        "| rejected | 1 |",
         "| baseline | 4500 | 41.5 | 0.0012 | 0.999 |",
         "| tail | 3600 | 44.25 | 0 | — |",
         f"- criteria_sha256: `{CRIT_SHA}`",
@@ -192,10 +202,10 @@ def test_inconclusive_reasons_have_remedies():
     v = verdict(
         checks=checks(
             CheckResult(
-                id="i7_stale_fill",
+                id="invariants",
                 kind="integrity",
                 outcome=INC,
-                reasons=(R.NO_SPEED_TIMELINE,),
+                reasons=(R.SCHEMA_DRIFT,),
             ),
             CheckResult(
                 id="protocol",
@@ -216,13 +226,10 @@ def test_inconclusive_reasons_have_remedies():
     assert v.verdict is INC and v.reasons == (R.LOW_FILL_COVERAGE,)
     text = fragment(v)
     assert "### INCONCLUSIVE 사유와 해소 방법" in text
-    assert (
-        f"| `{R.NO_SPEED_TIMELINE}` | `i7_stale_fill` | {REMEDY[R.NO_SPEED_TIMELINE]} |"
-        in text
-    )
+    assert f"| `{R.SCHEMA_DRIFT}` | `invariants` | {REMEDY[R.SCHEMA_DRIFT]} |" in text
     assert f"| `{R.LOW_FILL_COVERAGE}` | `fill_coverage` |" in text
     assert f"| `{R.CHECK_INCONCLUSIVE}` | `protocol` |" in text
-    assert "judge mark --speed" in text
+    assert "schema.sql" in text
     assert (
         "| 가드 | `fill_coverage` | guard | FAIL→INCONCLUSIVE | 예 | — "
         f"| `{R.LOW_FILL_COVERAGE}` |"
@@ -271,3 +278,10 @@ def test_table_cells_are_escaped():
         checks=checks(CheckResult(id="x", kind="client", outcome=PASS, value="a|b")),
     )
     assert "a\\|b" in fragment(v)
+
+
+def test_remedy_covers_contract_reasons_only():
+    """옛 계약 사유는 없다. 새 사유(SCHEMA_DRIFT, SNAPSHOT_LARGE)는 해소 방법이 있다(명세 6, 7)."""
+    assert {R.SCHEMA_DRIFT, R.SNAPSHOT_LARGE, R.JUDGE_SELF_CHECK} <= set(REMEDY)
+    assert set(REMEDY) <= R.ALL_REASONS
+    assert not any("pt_ro" in t or "REPLAY" in t for t in REMEDY.values())

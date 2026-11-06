@@ -8,36 +8,37 @@
 - judge(run_json, offline): run.json 하나로 collect(오프라인이면 건너뜀) → evaluate.
 
 증거 폴더(runs/<run_id>/, 설계 4.8, 5.2)
-    k6/orders.jsonl.gz | k6/orders.jsonl  주문 기록(JSONL v1). 둘 다 있으면 .gz를 읽는다
+    k6/orders.jsonl.gz | k6/orders.jsonl  주문 기록(JSONL v2, 명세 2). 둘 다 있으면 .gz를 읽는다
     k6/summary.json                       handleSummary. 없거나 깨지면(잘림) 기록 불완전(OOM 등)
     k6/pod-status.json                    k6 컨테이너 종료 코드
     k6/sha256sum.txt                      원격 sha256sum 출력. 없으면 sha256 미검증
     k6/derived.json                       노드 − 노트북 시계 차이. 없으면 표지 기준 구간은 NOT_EVALUATED
-    raw/db/snapshot.txt                   psql 출력(--@ 구획 + COPY CSV, 설계 5.4)
+    raw/db/snapshot.txt                   psql 출력(--@ 구획 + COPY CSV, 명세 6)
 
 판정 순서
 1. 증거를 읽는다. judge가 만드는 파일(pod-status, derived, sha256sum, snapshot)의 형식이 틀리면
    InputError(12)다. k6가 Pod 안에서 쓰는 파일(orders, summary)의 형식 오류는 기록 불완전으로
    다룬다(설계 5.7 하단). 기록의 run 값이 run_id와 달라도 InputError다.
-2. 계좌 집합(설계 5.3): JSONL account 계좌 + 보조 계좌(replay, nickname ^k6-<run_id>-[0-9]+$),
-   extra 계좌(DB 전용 검사만).
+2. 계좌 집합(명세 8): intent의 user_id(seed 계좌, k6가 만들지 않는다)와 extra 계좌
+   (run.json extra_accounts, 발표자 user_id. DB 전용 검사만).
 3. 분류(classify), 불변식(check_invariants → item_results), 기록 완전성(log_complete).
 4. 기준(checks)을 기준 파일 순서로 평가한다.
    - class: 분류 건수. phases가 있으면 그 구간(합집합)의 행만 센다.
      평가하지 않는 클래스(설계 5.3, 5.7 규칙 1): ACCOUNT_SET_MISMATCH면 LOST와 ORPHAN,
      기록 불완전이면 ORPHAN과 UNRESOLVED_*. 분류를 못 하면(기록 없음, DB 구획 없음) 전부다.
-     PASS만 막는 불확실성: TRANSPORT_REPLAY_POSSIBLE·재송신 비교 못 함(IDEMPOTENCY_VIOLATION),
-     RESPONSE_SCHEMA_UNCONFIRMED·응답 원문 못 읽음(MISMATCH). 이미 FAIL이면 FAIL이 남는다
-     (설계 4.4, 5.3, 5.7 규칙 4).
-   - sql·check i7: invariants.item_results. k6 exit_code: verdict.k6_exit_to_checks.
+     PASS만 막는 불확실성(_UNCERTAIN_SOURCES): 멱등 검사를 다 못 함(IDEMPOTENCY_VIOLATION),
+     RESPONSE_SCHEMA_UNCONFIRMED·200 원문 못 읽음·보낸 본문 없음(MISMATCH), 200 원문을 못 읽었고
+     DB 행도 없음(LOST). 이미 FAIL이면 FAIL이 남는다(설계 5.3, 5.7 규칙 4).
+   - sql·check(fresh): invariants.item_results. k6 exit_code: verdict.k6_exit_to_checks.
    - client·prom: 1차 미구현(설계 5.5, 5.9)이라 INCONCLUSIVE(NOT_EVALUATED). required: false면 보고만 한다.
-5. 가드(설계 5.6). 구현한 것: safety(1 VU = 1 계좌 재검사 포함, 설계 4.1), account_set,
-   fill_coverage, sell_coverage, load_coverage, fault_in_load, fault_effect(class_sub는 분류 결과,
-   observe는 run.json·marks.local의 obs 값), db_quiescent. 그 밖(2차 WS 가드)은 NOT_EVALUATED다.
+5. 가드(설계 5.6, 명세 8). 구현한 것: safety(종목·user_id 형식·run 키·1 VU = 1 user·비밀 키),
+   account_set, fill_coverage, sell_coverage(ask 체결), load_coverage, fault_in_load,
+   fault_effect(class_sub는 분류 결과, observe는 run.json·marks.local의 obs 값), db_quiescent.
+   그 밖(2차 WS 가드)은 NOT_EVALUATED다.
    표지 기준 구간과 fault_in_load는 시계 차이를 모르면(derived.json 없음) NOT_EVALUATED다.
    log_complete는 required=false로 덧붙인다.
-   judge_self_check(분류기 대 inv_i4)는 required=false 기준으로 덧붙인다.
-6. combine → build_verdict(설계 5.7, 5.8).
+   judge_self_check(스냅샷 run 키 주문 수 대 분류기 D1 수, 명세 7)는 required=false 기준으로 덧붙인다.
+6. combine → build_verdict(설계 5.7, 5.8). orders 행이 ORDERS_WARN_ROWS를 넘으면 경고 SNAPSHOT_LARGE.
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ from .classify import (
     classify,
     count_filled,
     count_subs,
+    run_order_count,
     summarize,
 )
 from .client import (
@@ -72,7 +74,7 @@ from .client import (
     run_window,
 )
 from .context import load_run
-from .criteria import RESOLVED_NAME, integrity_cfg, load_criteria
+from .criteria import RESOLVED_NAME, integrity_cfg, load_criteria, safety_cfg
 from .db import parse_bundle_output
 from .errors import InputError
 from .fetch import (
@@ -87,11 +89,10 @@ from .fetch import (
     SUMMARY,
 )
 from .invariants import (
-    I7_ID,
     check_invariants,
-    i4_counts,
     invariant_counts,
     item_results,
+    run_key_counts,
 )
 from .k6log import (
     COND_COUNTERS,
@@ -103,18 +104,25 @@ from .k6log import (
     sha_matches,
 )
 from .model import (
+    CLIENT_ORDER_ID_MAX,
+    ORDERS_WARN_ROWS,
+    SIDE_ASK,
     CheckResult,
     Classified,
     Criteria,
     DbSnapshot,
+    InvariantResult,
     K6Log,
     OrderClass,
     Outcome,
     RunContext,
     Verdict,
     canonical_json,
+    is_run_key,
+    run_key_prefix,
     sha256_bytes,
     sha256_text,
+    to_jsonable,
 )
 from .report import fragment
 from .transport import Transports
@@ -158,40 +166,29 @@ REPORT_NAME = "report.md"
 CLASSIFIED_NAME = "classified.csv"
 
 # 분류에 필요한 DB 구획. 하나라도 빠지면 모든 클래스가 DB_ERROR다
-CLASSIFY_SECTIONS = frozenset({"accounts", "orders", "fills"})
-AUX_ACCOUNT_RATIO = Decimal("0.1")  # 보조 계좌 상한 N × 0.1(설계 5.3)
+CLASSIFY_SECTIONS = frozenset({"accounts", "orders"})
 DEFAULT_LOAD_PHASES = ("baseline", "tail", "steady")  # load_coverage(설계 5.6)
 SELF_CHECK_ID = "judge_self_check"
 EXAMPLES_MAX = 20
-
-# inv_i4 problem → 분류 클래스(JUDGE_SELF_CHECK, 설계 5.4)
-_I4_CLASS = {
-    "dup_key": OrderClass.DUP_ORDER.value,
-    "dup_fill": OrderClass.DUP_FILL.value,
-    "filled_without_fill": OrderClass.FILL_STATE.value,
-    "rejected_with_fill": OrderClass.FILL_STATE.value,
-    "fill_without_order": OrderClass.FILL_STATE.value,
-    "fill_field": OrderClass.FILL_STATE.value,
-}
 _SHA_LINE = re.compile(r"^([0-9a-fA-F]{64})\s+\*?(.+)$")
 
-# PASS를 막는 불확실성(설계 4.4, 5.3, 5.7 규칙 4): 출처(marks 키 또는 클래스) → (낮출 클래스, 사유)
+# PASS를 막는 불확실성(설계 5.3, 5.7 규칙 4): 출처(classify marks 키 또는 클래스) → (낮출 클래스, 사유)
 _UNCERTAIN_SOURCES = {
-    R.TRANSPORT_REPLAY_POSSIBLE: (
-        OrderClass.IDEMPOTENCY_VIOLATION.value,
-        R.TRANSPORT_REPLAY_POSSIBLE,
-    ),
     "resend_uncompared": (OrderClass.IDEMPOTENCY_VIOLATION.value, R.NOT_EVALUATED),
     OrderClass.RESPONSE_SCHEMA_UNCONFIRMED.value: (
         OrderClass.MISMATCH.value,
         R.RESPONSE_SCHEMA_UNCONFIRMED,
     ),
     "response_unparsed": (OrderClass.MISMATCH.value, R.NOT_EVALUATED),
+    "body_missing": (OrderClass.MISMATCH.value, R.NOT_EVALUATED),
+    "lost_unknown": (OrderClass.LOST.value, R.NOT_EVALUATED),
 }
 # ACCOUNT_SET_MISMATCH면 평가하지 않는 클래스(설계 5.3, 5.7 규칙 1: LOST·ORPHAN)
 ACCOUNT_SET_UNAVAILABLE = (OrderClass.LOST.value, OrderClass.ORPHAN.value)
 CLOCK_UNKNOWN_NOTE = "시계 차이 미측정(k6/derived.json 없음, 설계 4.8 4단계·5.5)"
 
+# 열은 그대로 둔다(명세 4). resend는 옛 ResendOutcome 대신 재전송 수(시도 수 − 1)다.
+# 재전송이 atts에 합쳐졌기 때문이다(명세 2). result가 없는 행(INTERRUPTED, DB 전용)은 빈 값이다
 CLASSIFIED_COLUMNS = (
     "key",
     "account_id",
@@ -217,7 +214,8 @@ class Evidence:
     manifest: 읽으려 한 파일(증거 폴더 기준 posix 경로) → 원본 바이트 sha256(없으면 None).
     remote_sha: sha256sum.txt의 orders.jsonl 줄 값(16진 소문자).
     summary_error: summary.json이 있는데 JSON 객체로 읽지 못한 사유(잘림 등). 이때 summary는 None.
-    summary_token_key: 읽지 못한 summary 원문에서 "...token": 키를 찾았다(설계 5.6 safety).
+    summary_token_key: 읽지 못한 summary 원문에서 "...token"·"...authorization" 키를 찾았다
+      (명세 8 safety).
     clock_offset_ms: None이면 시계 차이를 모른다(derived.json 없음).
     """
 
@@ -299,10 +297,10 @@ def _remote_sha(text: str, name: str) -> str | None:
 
 
 def _summary(data: bytes | None) -> tuple[dict[str, Any] | None, str | None, bool]:
-    """summary.json을 읽는다. (summary, 읽지 못한 사유, 원문의 token 키 여부).
+    """summary.json을 읽는다. (summary, 읽지 못한 사유, 원문의 비밀 키 여부).
 
     k6가 Pod 안에서 쓰는 파일이라 OOM·SIGKILL로 잘린 채 남을 수 있다. 형식 오류는 입력 오류가
-    아니라 기록 불완전이다(설계 5.7 하단). token 키는 원문 텍스트에서 찾는다(설계 5.6, 7.4).
+    아니라 기록 불완전이다(설계 5.7 하단). 비밀 키(token·authorization)는 원문 텍스트에서 찾는다.
     """
     if data is None:
         return None, None, False
@@ -373,19 +371,18 @@ def load_evidence(evidence: str | Path) -> Evidence:
     )
 
 
-# ---------------------------------------------------------------- 계좌 집합(설계 5.3)
+# ---------------------------------------------------------------- 계좌 집합(명세 8)
 
 
 @dataclass(frozen=True)
 class AccountScope:
-    """이번 run 계좌. evaluable은 기록과 DB accounts 구획이 모두 있을 때 True다.
+    """이번 run 계좌(user_id). evaluable은 기록과 DB accounts 구획이 모두 있을 때 True다.
 
-    jsonl: JSONL account 계좌. aux: 서버에만 생긴 보조 계좌(nickname 정규식). extra: 발표자 계좌.
-    missing_jsonl·missing_extra: DB에 없는 계좌(정렬).
+    jsonl: intent의 user_id. 계좌는 seed로 미리 있고 k6가 만들지 않는다(옛 보조 계좌 개념 없음).
+    extra: 발표자 user_id(run.json extra_accounts). missing_jsonl·missing_extra: DB에 없는 계좌(정렬).
     """
 
     jsonl: frozenset[str]
-    aux: frozenset[str]
     extra: frozenset[str]
     missing_jsonl: tuple[str, ...] = ()
     missing_extra: tuple[str, ...] = ()
@@ -393,39 +390,28 @@ class AccountScope:
 
     @property
     def run_ids(self) -> frozenset[str]:
-        return self.jsonl | self.aux
+        return self.jsonl
 
     @property
     def mismatch(self) -> bool:
-        """ACCOUNT_SET_MISMATCH(설계 5.3): JSONL 계좌가 DB에 없거나 보조 계좌가 N × 0.1을 넘는다."""
-        if not self.evaluable:
-            return False
-        too_many = Decimal(len(self.aux)) > Decimal(len(self.jsonl)) * AUX_ACCOUNT_RATIO
-        return not self.jsonl or bool(self.missing_jsonl) or too_many
+        """ACCOUNT_SET_MISMATCH(명세 8): JSONL의 user_id 중 DB accounts에 없는 것이 있다.
+
+        다른 DB를 봤거나 seed가 다르다는 뜻이라 LOST·ORPHAN 판정을 보류한다(설계 5.7 규칙 1).
+        """
+        return self.evaluable and bool(self.missing_jsonl)
 
 
 def account_scope(
     ctx: RunContext, log: K6Log | None, db: DbSnapshot | None
 ) -> AccountScope:
-    """계좌 집합을 만든다(설계 5.3). 보조 계좌는 replay이고 nickname이 정확히 맞는 계좌다."""
+    """계좌 집합을 만든다(명세 8). DB accounts 구획이 없으면 evaluable이 False다."""
     extra = frozenset(ctx.extra_accounts)
     jsonl = log.account_ids if log is not None else frozenset()
     if log is None or db is None or "accounts" not in db.sections:
-        return AccountScope(jsonl=jsonl, aux=frozenset(), extra=extra)
-    nick = re.compile(rf"k6-{re.escape(ctx.run_id)}-[0-9]+")
-    db_ids = {a.id for a in db.accounts}
-    aux = frozenset(
-        a.id
-        for a in db.accounts
-        if a.id not in jsonl
-        and a.id not in extra
-        and a.mode == "replay"
-        and a.nickname is not None
-        and nick.fullmatch(a.nickname)
-    )
+        return AccountScope(jsonl=jsonl, extra=extra)
+    db_ids = {a.user_id for a in db.accounts}
     return AccountScope(
         jsonl=jsonl,
-        aux=aux,
         extra=extra,
         missing_jsonl=tuple(sorted(jsonl - db_ids)),
         missing_extra=tuple(sorted(extra - db_ids)),
@@ -504,10 +490,6 @@ def _result(
 def _requires(spec: Mapping[str, Any]) -> list[str]:
     req = spec.get("requires")
     return [req] if isinstance(req, str) else sorted(req or ())
-
-
-def _examples(keys: Iterable[str]) -> list[str]:
-    return sorted(keys)[:EXAMPLES_MAX]
 
 
 def _in_windows(t: int | None, windows: Sequence[tuple[int, int]]) -> bool:
@@ -629,17 +611,15 @@ def _class_check(st: _State, spec: Mapping[str, Any]) -> CheckResult:
 
 
 def _k6_checks(st: _State, spec: Mapping[str, Any]) -> list[CheckResult]:
+    """k6 종료 코드 기준. JSONL v2에는 setup_done이 없어 setup 시간은 0으로 본다(보수적 하한)."""
     log = st.log
     rs = log.run_start if log is not None else None
     plan_ms = plan_duration_ms(rs.plan) if rs is not None else None
-    setup_ms = 0
-    if rs is not None and log is not None and log.setup_done is not None:
-        setup_ms = max(0, log.setup_done.t - rs.t)
     return k6_exit_to_checks(
         st.ev.k6_exit_code,
         st.ev.summary,
         plan_ms,
-        setup_ms=setup_ms,
+        setup_ms=0,
         stopped_by_judge=st.stopped_by_judge,
         spec=spec,
     )
@@ -692,18 +672,23 @@ def _checks(st: _State, inv_items: Mapping[str, CheckResult]) -> list[CheckResul
 
 
 def _self_check(st: _State) -> CheckResult | None:
-    """분류기 대 inv_i4(설계 5.4 JUDGE_SELF_CHECK). 클래스별 '있음' 여부를 비교한다. 보고만 한다."""
+    """스냅샷 run 키 주문 수 대 분류기 D1 수(명세 7 judge_self_check). 보고만 한다.
+
+    스냅샷 쪽은 invariants.run_key_counts(run 키 전체 형식 주문 행 수·키 수), 분류기 쪽은
+    run 키 행에 매칭된 orders.id 수(classify.run_order_count)와 그 행 수다(D1 + ORPHAN).
+    다르면 분류기가 DB 행을 잃었거나 두 번 셌다(judge 결함). orders 구획이 없으면 내지 않는다.
+    """
     if st.result is None or st.db is None:
         return None
-    i4 = i4_counts(st.db)
-    if i4 is None:
+    run_id = st.ctx.run_id
+    snap = run_key_counts(st.db, run_id)
+    if snap is None:
         return None
-    names = sorted(set(_I4_CLASS.values()))
-    sql = {
-        n: any(_I4_CLASS.get(p) == n and k > 0 for p, k in i4.items()) for n in names
-    }
-    cls = {n: st.result.counts.get(n, 0) > 0 for n in names}
-    differs = [n for n in names if sql[n] != cls[n]]
+    keyed = [
+        c for c in st.result.classified if c.order_ids and is_run_key(c.key, run_id)
+    ]
+    cls = {"orders": run_order_count(st.result, run_id), "keys": len(keyed)}
+    differs = [k for k in ("orders", "keys") if snap[k] != cls[k]]
     return CheckResult(
         id=SELF_CHECK_ID,
         kind="integrity",
@@ -712,71 +697,78 @@ def _self_check(st: _State) -> CheckResult | None:
         on_violation="inconclusive",
         value=len(differs),
         reasons=(R.JUDGE_SELF_CHECK,) if differs else (),
-        detail={"inv_i4": i4, "classifier": cls, "sql": sql, "differs": differs},
+        detail={"snapshot": snap, "classifier": cls, "differs": differs},
     )
 
 
 # ---------------------------------------------------------------- 가드(설계 5.6)
 
 
+# safety value 중 건수 항목(하나라도 0이 아니면 위반). token_key는 bool이라 따로 본다
+SAFETY_COUNTS = (
+    "bad_market",
+    "bad_user",
+    "bad_key",
+    "inconsistent",
+    "vu_multi_account",
+    "account_multi_vu",
+)
+
+
 def _g_safety(st: _State, spec: Mapping[str, Any]) -> CheckResult:
+    """안전장치(명세 8). 모든 intent를 본다. 하나라도 어기면 FAIL(SAFETY_VIOLATION).
+
+    - bad_market: body.market이 safety.markets에 없다.
+    - bad_user: acct 또는 body.user_id가 safety.user_pattern에 전체 일치하지 않거나, 끝 번호가
+      1..safety.user_max 밖이다(명세 11).
+    - bad_key: key 또는 body.client_order_id가 이 run의 키가 아니거나 64자를 넘는다(명세 11,
+      서비스 schemas.py 상한). 명세 문구는 접두어 `k6-<run_id>-`지만 전체 형식
+      `k6-<run_id>-<vu>-<seq>`(model.is_run_key)로 본다. 접두어만 보면 r1117-crash의 판정이
+      r1117-crash-2의 키를 받아들인다. intent 없는 result의 키도 본다.
+    - inconsistent: key ≠ body.client_order_id 또는 acct ≠ body.user_id(명세 2).
+    - vu_multi_account·account_multi_vu: 1 VU = 1 user 위반(한 VU가 두 user, 한 user를 두 VU).
+    - token_key: 기록(JSONL, summary)에 token·authorization으로 끝나는 키가 있다.
+    """
     log = st.log
     if log is None:
         return _result(spec, Outcome.INCONCLUSIVE, reasons=(R.SENT_LOG_MISSING,))
-    sec = st.crit.data["safety"]
-    prefix, mode = str(sec["symbol_prefix"]), str(sec["account_mode"])
-    bad_symbol = [
-        k
-        for k, it in log.intents.items()
-        if not isinstance(it.body.get("symbol"), str)
-        or not it.body["symbol"].startswith(prefix)
-    ]
-    bad_account = [k for k, it in log.intents.items() if it.acct not in st.scope.jsonl]
-    vu_multi, acct_multi, vu_range = _vu_account_violations(log)
-    rs = log.run_start
-    bad_run_symbols = sorted(
-        s for s in (rs.symbols if rs else ()) if not s.startswith(prefix)
+    cfg = safety_cfg(st.crit)
+    run_id = st.ctx.run_id
+    found: dict[str, list[Any]] = {k: [] for k in SAFETY_COUNTS}
+    for key in sorted(log.intents):
+        it = log.intents[key]
+        body = it.body
+        if not cfg.market_ok(body.get("market")):
+            found["bad_market"].append(key)
+        if not (cfg.user_ok(it.acct) and cfg.user_ok(body.get("user_id"))):
+            found["bad_user"].append(key)
+        if not (
+            _safe_key(key, run_id) and _safe_key(body.get("client_order_id"), run_id)
+        ):
+            found["bad_key"].append(key)
+        if not it.consistent:
+            found["inconsistent"].append(key)
+    found["bad_key"] += sorted(
+        k for k in log.results if k not in log.intents and not _safe_key(k, run_id)
     )
-    detail: dict[str, Any] = {"symbol_prefix": prefix, "account_mode": mode}
-    bad_mode: list[str] = []
-    if st.db is not None and "accounts" in st.db.sections:
-        bad_mode = sorted(
-            a.id for a in st.db.accounts if a.id in st.scope.jsonl and a.mode != mode
-        )
-    else:
-        detail["note"] = "DB accounts 구획이 없어 계좌 mode는 보지 않았다"
+    found["vu_multi_account"] = [
+        vu for vu, users in log.accounts_by_vu.items() if len(users) > 1
+    ]
+    found["account_multi_vu"] = sorted(a.acct for a in log.accounts if len(a.vus) > 1)
     token_key = log.has_token_key or st.ev.summary_token_key
+    value: dict[str, Any] = {k: len(v) for k, v in found.items()}
+    value["token_key"] = token_key
+    detail: dict[str, Any] = {
+        "markets": list(cfg.markets),
+        "user_pattern": cfg.user_pattern,
+        "user_max": cfg.user_max,
+        "key_prefix": run_key_prefix(run_id),
+        "key_max": CLIENT_ORDER_ID_MAX,
+        "examples": {k: v[:EXAMPLES_MAX] for k, v in found.items() if v},
+    }
     if st.ev.summary_error is not None:
         detail["summary_token_scan"] = "text"  # 깨진 summary는 원문 텍스트로 찾았다
-    value = {
-        "bad_symbol": len(bad_symbol),
-        "bad_account": len(bad_account),
-        "bad_run_symbols": len(bad_run_symbols),
-        "bad_mode": len(bad_mode),
-        "vu_multi_account": len(vu_multi),
-        "account_multi_vu": len(acct_multi),
-        "vu_out_of_range": len(vu_range),
-        "token_key": token_key,
-    }
-    counted = (
-        "bad_symbol",
-        "bad_account",
-        "bad_run_symbols",
-        "bad_mode",
-        "vu_multi_account",
-        "account_multi_vu",
-        "vu_out_of_range",
-    )
-    violated = any(value[k] for k in counted) or token_key
-    detail["examples"] = {
-        "bad_symbol": _examples(bad_symbol),
-        "bad_account": _examples(bad_account),
-        "bad_mode": bad_mode[:EXAMPLES_MAX],
-        "vu_multi_account": vu_multi[:EXAMPLES_MAX],
-        "account_multi_vu": acct_multi[:EXAMPLES_MAX],
-        "vu_out_of_range": vu_range[:EXAMPLES_MAX],
-    }
-    if violated:
+    if token_key or any(value[k] for k in SAFETY_COUNTS):
         return _result(
             spec,
             Outcome.FAIL,
@@ -787,26 +779,17 @@ def _g_safety(st: _State, spec: Mapping[str, Any]) -> CheckResult:
     return _result(spec, Outcome.PASS, value=value, detail=detail)
 
 
-def _vu_account_violations(log: K6Log) -> tuple[list[int], list[str], list[int]]:
-    """1 VU = 1 계좌(설계 4.1, 4.2) 재검사. intent의 vu·acct로 본다.
-
-    (계좌가 둘 이상인 vu, vu가 둘 이상인 계좌, 1..계좌 수 밖의 vu). 모두 정렬.
-    ACCOUNTS == preAllocatedVUs == maxVUs라 vu.idInTest는 1..계좌 수다. idx는 실패 시 건너뛰어
-    vu − 1과 같다는 보장이 없어(4.2) 보지 않는다.
-    """
-    vu_accts: dict[int, set[str]] = {}
-    acct_vus: dict[str, set[int]] = {}
-    for it in log.intents.values():
-        vu_accts.setdefault(it.vu, set()).add(it.acct)
-        acct_vus.setdefault(it.acct, set()).add(it.vu)
-    n = len(log.accounts)
-    vu_multi = sorted(vu for vu, a in vu_accts.items() if len(a) > 1)
-    acct_multi = sorted(a for a, v in acct_vus.items() if len(v) > 1)
-    vu_range = sorted(vu for vu in vu_accts if not 1 <= vu <= n)
-    return vu_multi, acct_multi, vu_range
+def _safe_key(key: Any, run_id: str) -> bool:
+    """이 run의 전체 키 형식이고 서비스 상한(64자) 안이다(명세 8, 11)."""
+    return is_run_key(key, run_id) and len(key) <= CLIENT_ORDER_ID_MAX
 
 
 def _g_account_set(st: _State, spec: Mapping[str, Any]) -> CheckResult:
+    """계좌 집합(명세 8). JSONL의 user_id가 모두 DB accounts에 있어야 한다(seed 계좌).
+
+    없으면 ACCOUNT_SET_MISMATCH(LOST·ORPHAN 판정 보류). extra 계좌가 DB에 없거나
+    require_extra_accounts인데 비었으면 EXTRA_ACCOUNTS_MISSING.
+    """
     if st.log is None:
         return _result(spec, Outcome.INCONCLUSIVE, reasons=(R.SENT_LOG_MISSING,))
     sc = st.scope
@@ -820,16 +803,13 @@ def _g_account_set(st: _State, spec: Mapping[str, Any]) -> CheckResult:
         codes.append(R.EXTRA_ACCOUNTS_MISSING)
     value = {
         "jsonl": len(sc.jsonl),
-        "aux": len(sc.aux),
         "missing": len(sc.missing_jsonl),
         "extra": len(sc.extra),
         "extra_missing": len(sc.missing_extra),
     }
     detail = {
-        "aux_limit_ratio": str(AUX_ACCOUNT_RATIO),
         "require_extra_accounts": bool(st.crit.data.get("require_extra_accounts")),
         "examples": {
-            "aux": _examples(sc.aux),
             "missing": list(sc.missing_jsonl[:EXAMPLES_MAX]),
             "extra_missing": list(sc.missing_extra[:EXAMPLES_MAX]),
         },
@@ -871,8 +851,8 @@ def _g_sell_coverage(st: _State, spec: Mapping[str, Any]) -> CheckResult:
     if st.result is None:
         return _result(spec, Outcome.INCONCLUSIVE, reasons=(str(st.cls_reason),))
     need = st.crit.data["coverage"]["min_sell_filled"]
-    n = count_filled(st.result, side="sell", accounts=st.scope.run_ids)
-    detail = {"min_sell_filled": need, "scope": "run"}
+    n = count_filled(st.result, side=SIDE_ASK, accounts=st.scope.run_ids)
+    detail = {"min_sell_filled": need, "scope": "run", "side": SIDE_ASK}
     if n < need:
         return _result(
             spec, Outcome.FAIL, value=n, reasons=(R.LOW_FILL_COVERAGE,), detail=detail
@@ -886,13 +866,13 @@ def _num(v: Any) -> Decimal:
 
 
 def _ratio(st: _State, window: tuple[int, int]) -> Decimal | None:
+    """구간 달성률. 계획 시작은 run_start.t다(JSONL v2에는 setup_done이 없다)."""
     log = st.log
     if log is None or log.run_start is None:
         return None
-    origin = log.setup_done.t if log.setup_done is not None else log.run_start.t
     try:
         return achieved_ratio(
-            log.intents, log.run_start.plan, origin_ms=origin, window=window
+            log.intents, log.run_start.plan, origin_ms=log.run_start.t, window=window
         )
     except InputError:
         return None
@@ -992,7 +972,7 @@ def _g_db_quiescent(st: _State, spec: Mapping[str, Any]) -> CheckResult:
     db = st.db
     if db is None or db.fingerprint1 is None or db.fingerprint2 is None:
         return _result(spec, Outcome.INCONCLUSIVE, reasons=(R.DB_ERROR,))
-    value = {"f1": list(db.fingerprint1), "f2": list(db.fingerprint2)}
+    value = {"f1": to_jsonable(db.fingerprint1), "f2": to_jsonable(db.fingerprint2)}
     if not db.quiescent:
         return _result(spec, Outcome.FAIL, value=value, reasons=(R.DB_NOT_QUIESCENT,))
     return _result(spec, Outcome.PASS, value=value)
@@ -1132,7 +1112,7 @@ def _jsonable_summary(s: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _integrity(st: _State, inv_results: Sequence[CheckResult]) -> dict[str, Any]:
+def _integrity(st: _State, inv_results: Sequence[InvariantResult]) -> dict[str, Any]:
     log = st.log
     intents: dict[str, Any] = {"total": None, "ack": None, "results": None}
     if log is not None:
@@ -1152,6 +1132,9 @@ def _integrity(st: _State, inv_results: Sequence[CheckResult]) -> dict[str, Any]
         "examples": {},
         "summary": None,
     }
+    if st.db is not None and st.db.errors:
+        # 빠지거나 끝나지 않은 구획(DB_ERROR 근거). 접속 정보·비밀번호는 없다
+        out["db_errors"] = list(st.db.errors)
     if st.result is None:
         out["not_evaluated"] = {"*": st.cls_reason}
         return out
@@ -1170,7 +1153,7 @@ def _integrity(st: _State, inv_results: Sequence[CheckResult]) -> dict[str, Any]
 
 
 def _client(st: _State) -> dict[str, Any]:
-    """구간별 n(intent 수), 달성률, FILLED 수(설계 5.5). p95·오류율은 1차 미구현이다."""
+    """구간별 n(intent 수), 달성률, filled·ask filled 수(설계 5.5). p95·오류율은 1차 미구현이다."""
     phases: dict[str, Any] = {}
     log = st.log
     if log is None:
@@ -1187,7 +1170,7 @@ def _client(st: _State) -> dict[str, Any]:
                 st.result, start=a, end=b, accounts=st.scope.run_ids
             )
             entry["sell_filled"] = count_filled(
-                st.result, side="sell", start=a, end=b, accounts=st.scope.run_ids
+                st.result, side=SIDE_ASK, start=a, end=b, accounts=st.scope.run_ids
             )
         phases[p] = entry
     return {"phases": phases}
@@ -1201,17 +1184,13 @@ def _load(st: _State) -> dict[str, Any]:
     state = st.ev.summary.get("state") if st.ev.summary is not None else None
     if isinstance(state, Mapping):
         duration = state.get("testRunDurationMs")
-    setup_ms = None
-    if rs is not None and log is not None and log.setup_done is not None:
-        setup_ms = log.setup_done.t - rs.t
     return {
         "k6_exit_code": st.ev.k6_exit_code,
         "k6_exit_reason": st.ev.k6_exit_reason,
         "stopped_by_judge": st.stopped_by_judge,
         "profile": rs.profile if rs is not None else None,
-        "conn_reuse": rs.conn_reuse if rs is not None else None,
+        "vus": rs.vus if rs is not None else None,
         "plan_duration_ms": plan_duration_ms(rs.plan) if rs is not None else None,
-        "setup_ms": setup_ms,
         "test_run_duration_ms": duration,
         "summary_error": st.ev.summary_error,
         "window": None if lw is None else {"from_ms": lw[0], "to_ms": lw[1]},
@@ -1364,8 +1343,7 @@ def assess(
         uncertain=_uncertain(result),
     )
 
-    snapshot = db if db is not None else DbSnapshot((), (), (), (), None, None)
-    inv_results = check_invariants(snapshot, ctx, crit)
+    inv_results = check_invariants(db if db is not None else DbSnapshot(), ctx, crit)
     inv_items = {r.id: r for r in item_results(inv_results, crit)}
     checks = _checks(st, inv_items)
     self_check = _self_check(st)
@@ -1374,13 +1352,12 @@ def assess(
     guards = _guards(st)
 
     warnings: set[str] = set()
-    for r in inv_results:
-        if r.id == I7_ID:
-            warnings.update(str(w) for w in r.detail.get("warnings", ()))
     integrity = _integrity(st, inv_results)
     summary = integrity.get("summary")
     if isinstance(summary, Mapping):
         warnings.update(summary.get("warnings", ()))
+    if db is not None and len(db.orders) > ORDERS_WARN_ROWS:
+        warnings.add(R.SNAPSHOT_LARGE)  # 명세 6: 판정은 그대로, 경고만
 
     inputs = {
         "criteria_sha256": crit.sha256,
@@ -1422,6 +1399,14 @@ def _join(values: Iterable[Any]) -> str:
     return ";".join(str(v) for v in values)
 
 
+def _resend_count(c: Classified) -> str:
+    """재전송 수(시도 수 − 1). classify가 detail.statuses에 시도 상태를 차례로 남긴다."""
+    statuses = c.detail.get("statuses")
+    if not isinstance(statuses, (list, tuple)) or not statuses:
+        return ""
+    return str(len(statuses) - 1)
+
+
 def classified_csv(rows: Iterable[Classified]) -> str:
     """classified.csv(설계 5.2, 5.8). 한 줄 = 키 하나. detail은 canonical JSON이다."""
     buf = io.StringIO()
@@ -1437,7 +1422,7 @@ def classified_csv(rows: Iterable[Classified]) -> str:
                 _join(classes_of(c)),
                 "" if c.sub is None else str(c.sub),
                 _join(c.idem),
-                "" if c.resend is None else str(c.resend),
+                _resend_count(c),
                 "" if c.t is None else str(c.t),
                 _join(c.order_ids),
                 canonical_json(c.detail),
@@ -1464,9 +1449,10 @@ def collect(ctx: RunContext, crit: Criteria, tr: Transports) -> Path:
     1. fetch(4.8): k6 Pod를 찾고 terminated를 기다린다. k6/pod-status.json, k6/sha256sum.txt,
        k6/orders.jsonl.gz, k6/summary.json, k6/derived.json을 쓴다.
     2. 정지 확인: k6 종료 뒤 10s 기다린다.
-    3. DB: db.build_bundle → db.exec_bundle(psql 1회). 출력은 raw/db/snapshot.txt.
+    3. DB(명세 6): db.build_bundle(ctx, stale_ms=integrity_cfg(crit).stale_ms) →
+       db.exec_bundle(tr, bundle, target=ctx.db)(psql 1회, 비밀번호 없음). 출력은 raw/db/snapshot.txt.
        F1 ≠ F2면 30s 뒤 한 번 더. psql 실패(TransportError)는 잡아 빠진 구획(DB_ERROR)으로 남긴다.
-    4. Pod 관측: kubectl get pods -o json을 raw/k8s/에 남기고 pod_replaced·crash_restart·배속을 만든다.
+    4. Pod 관측: kubectl get pods -o json을 raw/k8s/에 남기고 pod_replaced·crash_restart를 만든다.
     5. RELEASE(fetch.release), evidence.json(파일별 sha256), criteria.resolved.yaml.
     돌려주는 값은 증거 폴더(runs/<run_id>/)다.
     """

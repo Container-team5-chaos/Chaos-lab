@@ -1,5 +1,6 @@
-# demo-min(시연): 장애 키는 발표자 replay 계좌다(L112, L281). Prometheus 없이 낸다(설계 6, 3절 시연)
+# demo-min(시연): 발표자 계좌는 run.json extra_accounts의 user_id다(명세 8). Prometheus 없이 낸다(설계 6, 3절 시연)
+# crash_restart 관측은 앱 FAULT 훅이 있어야 생긴다(확인 필요: 앱 팀)
 extends: default.yaml
-require_extra_accounts: true                   # run.json 또는 judge mark --extra-account
+require_extra_accounts: true                   # run.json 또는 judge mark --extra-account <user_id>
 fault_effect: [{id: presenter_crash, observe: crash_restart, target: order-api, min: 1}]
 checks: [{id: order_p95_k6, required: false}, {id: order_err_k6, required: false}]

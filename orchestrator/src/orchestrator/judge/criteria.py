@@ -10,6 +10,11 @@
   on_violation 기본값은 checks가 fail, guards·fault_effect가 inconclusive(5.6 가드).
 - 결과는 정렬된 키의 YAML(criteria.resolved.yaml)과 그 sha256이다.
   resolved 파일을 다시 load_criteria로 읽으면 같은 내용·같은 해시가 나온다.
+- 계약 정렬 명세 9, 11: safety는 markets·user_pattern·user_max, integrity는 response_fields(응답
+  필드 → orders 열)·response_fields_confirmed·initial_krw·stale_ms다. user_max·initial_krw·stale_ms는
+  없으면 기본값을 채운다(resolved에 남는다). 옛 키(symbol_prefix, account_mode, price_max_age_ms)는
+  거부한다.
+- integrity 항목의 sql:은 DB 불변식 id 목록(model.INVARIANTS), check:는 fresh다(명세 7).
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import copy
 import math
 import re
 from collections.abc import Callable, Mapping
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -25,11 +31,18 @@ import yaml
 
 from .errors import InputError
 from .model import (
-    INVARIANT_SQL,
+    DEFAULT_INITIAL_KRW,
+    DEFAULT_STALE_MS,
+    DEFAULT_USER_MAX,
+    INTEGRITY_CHECKS,
+    INVARIANTS,
+    NON_COMPARE_FIELDS,
+    ORDER_COLUMNS,
     Criteria,
     IntegrityCfg,
     OkSub,
     OrderClass,
+    SafetyCfg,
     sha256_text,
 )
 
@@ -37,6 +50,7 @@ __all__ = [
     "Criteria",
     "load_criteria",
     "integrity_cfg",
+    "safety_cfg",
     "write_resolved",
     "dump_resolved",
     "duration_ms",
@@ -70,7 +84,7 @@ PHASE_NAMES = frozenset({"warmup", "baseline", "fault", "recovery", "tail", "ste
 OPS = frozenset({"==", "!=", "<", "<=", ">", ">="})
 ON_VIOLATION = frozenset({"fail", "inconclusive"})
 CHECK_KINDS = frozenset({"integrity", "unresolved", "client", "prom", "k6"})
-INTEGRITY_CHECKS = frozenset({"i7"})  # check: 이름(Python 검사, 5.4)
+KNOWN_CHECKS = frozenset(INTEGRITY_CHECKS)  # check: 이름(명세 7 fresh)
 K6_CHECKS = frozenset({"exit_code"})
 CLIENT_STATS = frozenset(
     {
@@ -82,7 +96,7 @@ CLIENT_STATS = frozenset(
         "sell_filled",
     }
 )
-KNOWN_SQL = frozenset(INVARIANT_SQL)
+KNOWN_SQL = frozenset(INVARIANTS)  # sql: 이름(명세 7 DB 불변식)
 KNOWN_GUARDS = frozenset(
     {
         "safety",
@@ -100,7 +114,20 @@ KNOWN_GUARDS = frozenset(
     }
 )
 FAULT_OBSERVE = frozenset({"pod_replaced", "crash_restart"})
-RESPONSE_FIELD_NAMES = frozenset({"status", "reject_reason", "price", "fee"})
+# 없앤 키 → 안내(명세 9). 모르는 키보다 먼저 알려 준다.
+REMOVED_KEYS = {
+    "safety": {
+        "symbol_prefix": "safety.markets",
+        "account_mode": "safety.user_pattern",
+    },
+    "integrity": {"price_max_age_ms": "integrity.stale_ms"},
+}
+# 없으면 채우는 기본값(명세 7. 근거 seed.sql, app/config.py STALE_MS)
+INTEGRITY_DEFAULTS = {"initial_krw": DEFAULT_INITIAL_KRW, "stale_ms": DEFAULT_STALE_MS}
+# 명세 11. 근거 seed.sql user-0001..1000
+SAFETY_DEFAULTS = {"user_max": DEFAULT_USER_MAX}
+RESPONSE_FIELD_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+MARKET_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 
 ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 MARK_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -174,7 +201,18 @@ def integrity_cfg(crit: Criteria) -> IntegrityCfg:
     return IntegrityCfg(
         response_fields=dict(sorted(sec["response_fields"].items())),
         response_fields_confirmed=sec["response_fields_confirmed"],
-        price_max_age_ms=sec["price_max_age_ms"],
+        initial_krw=Decimal(sec["initial_krw"]),
+        stale_ms=sec["stale_ms"],
+    )
+
+
+def safety_cfg(crit: Criteria) -> SafetyCfg:
+    """기준의 safety 맵을 SafetyCfg로 바꾼다(명세 8)."""
+    sec = crit.data["safety"]
+    return SafetyCfg(
+        markets=tuple(sec["markets"]),
+        user_pattern=sec["user_pattern"],
+        user_max=sec["user_max"],
     )
 
 
@@ -424,22 +462,53 @@ def _v_mark(v: Any, where: str) -> None:
         raise _err(where, "표지 이름이어야 한다(예: inject_start)")
 
 
-def _v_account_mode(v: Any, where: str) -> None:
-    if v not in ("replay", "live"):
-        raise _err(where, "replay|live여야 한다")
+def _v_markets(v: Any, where: str) -> None:
+    if not isinstance(v, list) or not v:
+        raise _err(where, "비어 있지 않은 종목 목록이어야 한다(예: [KRW-BTC])")
+    for x in v:
+        if not isinstance(x, str) or not MARKET_RE.fullmatch(x):
+            raise _err(where, f"종목 이름 {x!r}가 올바르지 않다")
+    if len(set(v)) != len(v):
+        raise _err(where, "종목이 중복된다")
+
+
+def _v_regex(v: Any, where: str) -> None:
+    _v_str(v, where)
+    try:
+        re.compile(v)
+    except re.error as e:
+        raise _err(where, f"정규식 오류({e})") from e
+
+
+def _v_krw(v: Any, where: str) -> None:
+    """원화 금액. 문자열 Decimal(권장) 또는 정수. 0 이상, 소수 4자리 이하(NUMERIC(24,4))."""
+    if isinstance(v, bool) or not isinstance(v, (str, int)):
+        raise _err(where, '문자열 금액이어야 한다(예: "10000000")')
+    try:
+        d = Decimal(str(v).strip())
+    except InvalidOperation as e:
+        raise _err(where, f"금액 형식이 아니다({v!r})") from e
+    if not d.is_finite() or d < 0:
+        raise _err(where, "0 이상 유한한 금액이어야 한다")
+    exp = d.as_tuple().exponent
+    if isinstance(exp, int) and exp < -4:
+        raise _err(where, "소수 4자리까지다(accounts.krw NUMERIC(24,4))")
 
 
 def _v_response_fields(v: Any, where: str) -> None:
-    if not isinstance(v, dict):
-        raise _err(where, "맵이어야 한다")
-    unknown = sorted(set(v) - RESPONSE_FIELD_NAMES)
-    if unknown:
-        raise _err(where, f"모르는 키 {unknown}")
-    missing = sorted(RESPONSE_FIELD_NAMES - set(v))
-    if missing:
-        raise _err(where, f"필수 키 {missing}가 없다")
-    for k, name in v.items():
-        _v_str(name, f"{where}.{k}")
+    """응답 필드 → orders 열(명세 5). replayed·reason은 비교 필드가 아니다."""
+    if not isinstance(v, dict) or not v:
+        raise _err(where, "비어 있지 않은 맵이어야 한다(응답 필드 → orders 열)")
+    for k, col in v.items():
+        if not isinstance(k, str) or not RESPONSE_FIELD_RE.fullmatch(k):
+            raise _err(where, f"응답 필드 이름 {k!r}가 올바르지 않다")
+        if k in NON_COMPARE_FIELDS:
+            raise _err(where, f"{k}는 분류 입력이라 비교 필드로 쓸 수 없다")
+        if col not in ORDER_COLUMNS:
+            raise _err(
+                f"{where}.{k}",
+                f"orders 열이 아니다({col!r}, 허용: {list(ORDER_COLUMNS)})",
+            )
 
 
 # 맵 구획 명세: 키 → (검사 함수 또는 하위 명세, 필수 여부)
@@ -447,7 +516,11 @@ Spec = Mapping[str, tuple[Any, bool]]
 
 SECTION_SPECS: Mapping[str, tuple[Spec, bool]] = {
     "safety": (
-        {"symbol_prefix": (_v_str, True), "account_mode": (_v_account_mode, True)},
+        {
+            "markets": (_v_markets, True),
+            "user_pattern": (_v_regex, True),
+            "user_max": (_v_pos_int, False),
+        },
         True,
     ),
     "phases": (
@@ -488,7 +561,8 @@ SECTION_SPECS: Mapping[str, tuple[Spec, bool]] = {
         {
             "response_fields": (_v_response_fields, True),
             "response_fields_confirmed": (_v_bool, True),
-            "price_max_age_ms": (_v_pos_int, True),
+            "initial_krw": (_v_krw, False),
+            "stale_ms": (_v_pos_int, False),
         },
         True,
     ),
@@ -579,8 +653,8 @@ def _validate_check(item: dict[str, Any], where: str) -> None:
             _v_list_of(item["class"], classes, f"{where}.class", "클래스")
         if "sql" in item:
             _v_list_of(item["sql"], KNOWN_SQL, f"{where}.sql", "불변식")
-        if "check" in item and item["check"] not in INTEGRITY_CHECKS:
-            raise _err(f"{where}.check", f"허용: {sorted(INTEGRITY_CHECKS)}")
+        if "check" in item and item["check"] not in KNOWN_CHECKS:
+            raise _err(f"{where}.check", f"허용: {sorted(KNOWN_CHECKS)}")
         _v_op_value(item, where, required=True)
     elif kind == "unresolved":
         if "class" not in item:
@@ -650,7 +724,11 @@ def _finalize(merged: dict[str, Any], where: str) -> dict[str, Any]:
             if required:
                 raise _err(where, f"병합 결과에 필수 키 '{name}'가 없다")
             continue
+        _reject_removed(data[name], name, where)
         _validate_map(data[name], spec, f"{where}: {name}")
+    _fill_integrity_defaults(data["integrity"])
+    for k, v in SAFETY_DEFAULTS.items():
+        data["safety"].setdefault(k, v)
     rea = data.setdefault("require_extra_accounts", False)
     _v_bool(rea, f"{where}: require_extra_accounts")
 
@@ -675,6 +753,22 @@ def _finalize(merged: dict[str, Any], where: str) -> dict[str, Any]:
             if key == "guards":
                 item.setdefault("kind", "guard")
     return data
+
+
+def _reject_removed(sec: Any, name: str, where: str) -> None:
+    if not isinstance(sec, dict):
+        return
+    old = sorted(set(sec) & set(REMOVED_KEYS.get(name, {})))
+    if old:
+        hint = ", ".join(f"{k} → {REMOVED_KEYS[name][k]}" for k in old)
+        raise _err(f"{where}: {name}", f"옛 계약 키 {old}는 없앴다({hint}, 명세 9)")
+
+
+def _fill_integrity_defaults(sec: dict[str, Any]) -> None:
+    """initial_krw·stale_ms 기본값을 채운다. initial_krw는 문자열로 맞춘다(해시 안정)."""
+    for k, v in INTEGRITY_DEFAULTS.items():
+        sec.setdefault(k, v)
+    sec["initial_krw"] = str(sec["initial_krw"]).strip()
 
 
 def _plain(v: Any) -> Any:

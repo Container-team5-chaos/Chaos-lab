@@ -34,7 +34,6 @@ import sys
 import tempfile
 import time
 import traceback
-import uuid
 from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -45,7 +44,13 @@ from . import __version__
 from . import client as client_mod
 from . import fetch as fetch_mod
 from . import limit as limit_mod
-from .context import EPOCH_MS_MAX, EPOCH_MS_MIN, MARKS_LOCAL_NAME, load_run
+from .context import (
+    EPOCH_MS_MAX,
+    EPOCH_MS_MIN,
+    MARKS_LOCAL_NAME,
+    check_user_id,
+    load_run,
+)
 from .criteria import RESOLVED_NAME, load_criteria
 from .errors import (
     EXIT_BY_VERDICT,
@@ -95,7 +100,7 @@ def _epoch_ms_arg(s: str) -> int:
 
 
 def _speed_arg(s: str) -> Decimal:
-    """--speed: 0보다 큰 유한한 수(설계 5.2 4단계, 5.4 I7)."""
+    """--speed: 0보다 큰 유한한 수. 리플레이 배속 기록이다(참고용, 판정에 쓰지 않는다. 명세 7)."""
     try:
         v = Decimal(s.strip())
     except InvalidOperation as e:
@@ -105,11 +110,12 @@ def _speed_arg(s: str) -> Decimal:
     return v
 
 
-def _uuid_arg(s: str) -> str:
+def _user_id_arg(s: str) -> str:
+    """--extra-account: 발표자 user_id(명세 8). 형식은 context.check_user_id와 같다."""
     try:
-        return str(uuid.UUID(s))
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(f"UUID가 아니다: {s!r}") from e
+        return check_user_id(s, "--extra-account")
+    except InputError as e:
+        raise argparse.ArgumentTypeError(str(e)) from e
 
 
 def _obs_value(s: str) -> Any:
@@ -183,9 +189,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("plan", _cmd_plan, "k6 Job 템플릿 렌더와 구간 길이 검사(설계 1.4, 4.8, 5.9)")
     accounts = add(
-        "accounts", _cmd_accounts, "k6 setup_done 확인, idx0 계좌 id 출력(설계 3)"
+        "accounts",
+        _cmd_accounts,
+        "k6 기록의 계좌 확인, idx0 user_id 출력(설계 3, 명세 8)",
     )
-    accounts.add_argument("--wait", action="store_true", help="setup_done까지 기다린다")
+    accounts.add_argument(
+        "--wait", action="store_true", help="첫 intent 줄이 나올 때까지 기다린다"
+    )
     add("doctor", _cmd_doctor, "권한·라벨·psql 사전 점검(설계 7.5)")
     add("fetch", _cmd_fetch, "k6 기록 회수(설계 4.8)")
     add("collect", _cmd_collect, "fetch → 정지 확인 → DB → Pod 관측(설계 5.2)")
@@ -211,16 +221,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--speed",
         type=_speed_arg,
         metavar="N",
-        help="--at(또는 현재) 시각부터 리플레이 배속 N(replay_speed에 추가)",
+        help="--at(또는 현재) 시각부터 리플레이 배속 N(replay_speed에 추가). 참고용, 판정에 쓰지 않는다",
     )
     mark.add_argument(
         "--extra-account",
         dest="extra_accounts",
         action="append",
-        type=_uuid_arg,
+        type=_user_id_arg,
         default=[],
-        metavar="UUID",
-        help="DB 전용 검사만 받는 계좌(시연 발표자, 설계 5.3). 여러 번 줄 수 있다",
+        metavar="USER_ID",
+        help="DB 전용 검사만 받는 계좌 user_id(시연 발표자, 명세 8). 여러 번 줄 수 있다",
     )
     mark.add_argument(
         "--obs",
@@ -526,7 +536,7 @@ def _apply_mark(
                 f"{MARKS_LOCAL_NAME}에 쓰지 않는다"
             )
         accts = _section(new, "extra_accounts", list)
-        known = {str(a).lower() for a in accts}
+        known = {str(a) for a in accts}  # user_id는 대소문자를 구분한다(TEXT PK)
         for a in args.extra_accounts:
             if a not in known:
                 accts.append(a)

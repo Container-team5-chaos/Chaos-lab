@@ -44,8 +44,8 @@
       "type": "counter",
       "contains": "default",
       "values": {
-        "count": 11,
-        "rate": 0.72206
+        "count": 12,
+        "rate": 0.78769
       }
     }
   }

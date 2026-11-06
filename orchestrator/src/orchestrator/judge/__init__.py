@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .context import load_run
-from .criteria import integrity_cfg, load_criteria
+from .criteria import integrity_cfg, load_criteria, safety_cfg
 from .errors import (
     EXIT_FAIL,
     EXIT_INCONCLUSIVE,
@@ -23,6 +23,7 @@ from .model import (
     Classified,
     Criteria,
     DbSnapshot,
+    DbTarget,
     IntegrityCfg,
     K6Log,
     KState,
@@ -30,6 +31,7 @@ from .model import (
     OrderClass,
     Outcome,
     RunContext,
+    SafetyCfg,
     Verdict,
 )
 
@@ -45,6 +47,7 @@ __all__ = [
     "Classified",
     "Criteria",
     "DbSnapshot",
+    "DbTarget",
     "InputError",
     "IntegrityCfg",
     "JudgeError",
@@ -54,6 +57,7 @@ __all__ = [
     "OrderClass",
     "Outcome",
     "RunContext",
+    "SafetyCfg",
     "Verdict",
     "collect",
     "evaluate",
@@ -61,6 +65,7 @@ __all__ = [
     "judge",
     "load_criteria",
     "load_run",
+    "safety_cfg",
 ]
 
 

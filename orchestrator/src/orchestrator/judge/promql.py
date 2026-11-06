@@ -28,7 +28,7 @@ __all__ = [
     "window_ok",
 ]
 
-NAMESPACE_MATCHER = 'namespace="papertrade"'  # 7.3
+NAMESPACE_MATCHER = 'namespace="papertrade"'  # 7.3. namespace는 확인 필요(인프라)
 MIN_RATE_SCRAPES = 4  # rate 창 ≥ 4 × scrape_interval
 MIN_SUBQUERY_POINTS = 3  # gauge subquery 점 수
 QUERY_DELAY_SCRAPES = 2  # 조회는 구간 끝 + 2 × scrape 이후

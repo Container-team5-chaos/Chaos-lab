@@ -10,8 +10,9 @@ fragment(verdict)는 Verdict만 읽는 순수 함수다. 현재 시각·generate
 - integrity.classes: OrderClass 값 → 건수. integrity.subs: OkSub 값 → 건수.
 - integrity.not_evaluated: 평가하지 않은 클래스 → 사유("*"는 전부). 그 클래스가 든 수치는
   확정 값처럼 쓰지 않는다. 아는 부분만 있으면 '≥n(사유)', 없으면 '?(사유)'다(설계 5.3, 5.7 규칙 1).
-- integrity.invariants: 불변식 이름(i2, i5_cash, ..., i7) → 위반 행 수. None은 구획 없음.
-  값이 {"count"|"violations": n} 맵이어도 읽는다. i7이 없으면 checks의 i7_stale_fill 값을 쓴다.
+- integrity.invariants: 불변식 id(cash, qty, avg, nonneg, arith, constraints, fresh, 명세 7) → 위반 수.
+  None은 평가하지 못함(DB_ERROR, SCHEMA_DRIFT, ticks 없음 등). 값이 {"count"|"violations": n} 맵이어도
+  읽는다. 잔고 불일치 = cash + qty + avg. fresh가 없으면 checks의 stale_fill 값을 쓴다.
 - client.phases: 구간 → {"n", "ack_p95_ms", "sys_err_ratio", "achieved_ratio"}.
   phases 키가 없으면 client 최상위의 맵 값을 구간으로 본다.
 - inputs: criteria_sha256, run_json_sha256, evidence_manifest_sha256, judge_version,
@@ -42,35 +43,35 @@ from .verdict import effective_outcome, item_reasons
 
 __all__ = ["fragment", "summary_line", "REMEDY", "BALANCE_INVARIANTS"]
 
-# 잔고 불일치 = I2 + I5(설계 0 표, 5.4)
-BALANCE_INVARIANTS = ("i2", "i5_cash", "i5_qty", "i5_flat")
-STALE_FILL_INVARIANT = "i7"
-STALE_FILL_CHECK_ID = "i7_stale_fill"
+# 잔고 불일치 = cash + qty + avg(명세 7. 현금 보존식, 수량 보존식, 평균가 재생)
+BALANCE_INVARIANTS = ("cash", "qty", "avg")
+STALE_FILL_INVARIANT = "fresh"  # 명세 7 fresh(선택)
+STALE_FILL_CHECK_ID = "stale_fill"  # default.yaml 기준 id
 
 PHASE_ORDER = ("warmup", "baseline", "fault", "recovery", "tail", "steady")
 
 # INCONCLUSIVE 사유 → 해소 방법(설계 4.1–4.8, 5.2–5.7)
 REMEDY = {
-    R.SAFETY_VIOLATION: "intent 종목·계좌와 기록의 token 키를 확인하고 안전장치(4.1)를 고친 뒤 새 run_id로 다시 돈다.",
-    R.ACCOUNT_SET_MISMATCH: "JSONL account 줄과 DB 계좌(nickname 정규식)를 대조한다. Job 재실행을 확인하고 새 run_id로 다시 돈다.",
-    R.LOW_FILL_COVERAGE: "구간 체결 수가 기준보다 적다. ingest-replay 가동과 REPLAY 종목 시세를 확인하고 다시 돈다.",
+    R.SAFETY_VIOLATION: "intent의 market·user_id·client_order_id(k6-<run_id>-…), 1 VU = 1 user, 기록의 token·authorization 키를 확인하고 k6 스크립트를 고친 뒤 새 run_id로 다시 돈다.",
+    R.ACCOUNT_SET_MISMATCH: "JSONL의 user_id가 DB accounts에 없다. psql 대상(run.json db)과 seed.sql 적용을 확인하고 다시 돈다.",
+    R.LOW_FILL_COVERAGE: "구간 체결 수가 기준보다 적다. 시세 수집(Redis price:<market>)과 stale_price·price_unavailable 거절 수를 확인하고 다시 돈다.",
     R.GENERATOR_LIMITED: "달성률이 기준보다 낮다. k6 자원, VU 수, dropped_iterations를 확인한다.",
     R.FAULT_OUTSIDE_LOAD: "장애 시각이 부하 창 밖이다. 주입을 부하 창 안으로 옮기거나 DURATION_S를 늘린다.",
     R.FAULT_NOT_OBSERVED: "기대한 장애 효과가 관측되지 않았다. 주입 대상·시각과 raw/k8s Pod 관측을 확인한다.",
     R.DB_NOT_QUIESCENT: "스냅샷 중 DB가 바뀌었다. 부하가 멈춘 것을 확인하고 judge collect를 다시 돈다.",
     R.SENT_LOG_INCOMPLETE: "orders.jsonl이 불완전하다. k6 종료 코드, Counter, sha256을 확인한다. 고아·unresolved 기준만 영향받는다.",
     R.SENT_LOG_MISSING: "기록을 회수하지 못했다. Job을 지우지 말고 judge fetch를 다시 돈다.",
-    R.TRANSPORT_REPLAY_POSSIBLE: "연결 재사용이 켜져 있었다. noConnectionReuse: true로 다시 돈다(4.4).",
     R.RESPONSE_SCHEMA_UNCONFIRMED: "응답 필드를 앱 팀과 확정하고 response_fields_confirmed: true로 judge evaluate --offline을 다시 돈다.",
     R.LOAD_ABORTED: "k6가 중간에 멈췄다. k6/pod-status.json과 summary.json을 확인하고 다시 돈다.",
     R.LOAD_INVALID: "k6 스크립트·설정 오류다(104·107). env와 안전장치 조건을 고쳐 다시 돈다.",
-    R.DB_ERROR: "psql 구획이 빠졌다. raw/db 출력과 pt_ro 권한을 확인하고 judge collect를 다시 돈다.",
+    R.DB_ERROR: "psql 구획이 빠졌다. raw/db 출력과 psql 대상(run.json db: pod·container·user·database)을 확인하고 judge collect를 다시 돈다.",
     R.EXTRA_ACCOUNTS_MISSING: "발표자 계좌가 없다. judge mark --extra-account로 넣고 judge evaluate를 다시 돈다.",
     R.CLOCK_SKEW: "노드와 노트북 시계 차이가 크다. derived.json을 확인하고 시간 동기화 뒤 다시 돈다.",
     R.LOW_SAMPLES: "구간 표본이 모자란다. 구간을 늘리거나 RATE를 올린다.",
-    R.NO_SPEED_TIMELINE: "리플레이 배속을 모른다. judge mark --speed로 넣고 judge evaluate를 다시 돈다.",
-    R.JUDGE_SELF_CHECK: "분류기와 inv_i4 결과가 다르다. classified.csv와 raw/db를 대조한다(judge 버그 가능).",
-    R.CONSTRAINT_MISSING: "명세 제약이 DB에 없다. 앱 팀에 DDL 적용을 요청한다.",
+    R.JUDGE_SELF_CHECK: "스냅샷 run 키 주문 수와 분류기 D1 수가 다르거나 스냅샷 행이 지문과 다르다. classified.csv와 raw/db를 대조한다(judge 결함 가능).",
+    R.SCHEMA_DRIFT: "DB 스키마가 서비스 schema.sql과 다르다(테이블·열·UNIQUE·CHECK). 앱 팀과 스키마를 맞추고 다시 돈다.",
+    R.REJECT_AFTER_INFLIGHT: "결과 불명 시도 뒤 재전송이 확정 거절을 받았는데 앞 시도가 늦게 체결됐다(서비스 find_order가 잠금 밖). 클라이언트는 거절로 안내받았으므로 유실 기준 FAIL이다. 앱 팀에 멱등 조회를 잠금 안으로 옮기도록 요청한다.",
+    R.SNAPSHOT_LARGE: "orders 행이 많아 스냅샷이 크다. 판정은 그대로다. 실험 전 DB를 seed로 다시 채운다.",
     R.CHECK_INCONCLUSIVE: "기준을 판정할 수 없었다. 해당 기준의 detail을 확인한다.",
     R.NOT_EVALUATED: "평가하지 못한 기준이 있다. 입력과 증거 파일이 모두 있는지 확인한다.",
     R.LOW_TRAFFIC: "회복 판정 구간의 트래픽이 모자란다. RATE를 올리거나 구간을 늘린다.",
@@ -256,9 +257,13 @@ def summary_line(verdict: Verdict) -> str:
 
 
 def _recovered_line(v: Verdict) -> str:
-    after, lookup = _sub(v, OkSub.AFTER_COMMIT), _sub(v, OkSub.LOOKUP)
-    total = None if after is None or lookup is None else after + lookup
-    return f"커밋 후 회수 {_n(total)}건(after_commit {_n(after)}, lookup {_n(lookup)})"
+    """커밋 후 회수(명세 4): 결과 불명 시도가 커밋됐고 같은 키 재전송이 replayed로 돌려받았다."""
+    return f"커밋 후 회수 {_n(_sub(v, OkSub.AFTER_COMMIT))}건(after_commit)"
+
+
+def _names(classes: frozenset[OrderClass]) -> str:
+    """클래스 묶음 이름(OrderClass 정의 순서, '+'로 잇는다)."""
+    return "+".join(c.value for c in OrderClass if c in classes)
 
 
 def _orders_section(v: Verdict) -> list[str]:
@@ -266,15 +271,15 @@ def _orders_section(v: Verdict) -> list[str]:
     log_complete = v.integrity.get("log_complete")
     rows = [
         ("의도(intent)", _n(total)),
-        ("ACK(200·201)", _n(ack)),
-        ("유실(LOST+PHANTOM_ACK+FALSE_NOT_FOUND)", _class_text(v, LOSS_CLASSES)),
-        ("내용 불일치(MISMATCH+BODY_MISMATCH)", _class_text(v, MISMATCH_CLASSES)),
+        ("ACK(200, order_id)", _n(ack)),
+        (f"유실({_names(LOSS_CLASSES)})", _class_text(v, LOSS_CLASSES)),
+        (f"내용 불일치({_names(MISMATCH_CLASSES)})", _class_text(v, MISMATCH_CLASSES)),
+        (f"중복({_names(DUPLICATE_CLASSES)})", _class_text(v, DUPLICATE_CLASSES)),
+        (f"고아({_names(ORPHAN_CLASSES)})", _class_text(v, ORPHAN_CLASSES)),
         (
-            "중복(DUP_ORDER+DUP_FILL+FILL_STATE+IDEMPOTENCY_VIOLATION)",
-            _class_text(v, DUPLICATE_CLASSES),
+            f"결과 불명·중단(사용자 영향: {_names(USER_IMPACT_CLASSES)})",
+            _class_text(v, USER_IMPACT_CLASSES),
         ),
-        ("고아(ORPHAN)", _class_text(v, ORPHAN_CLASSES)),
-        ("미확정·미진입(사용자 영향)", _class_text(v, USER_IMPACT_CLASSES)),
         (
             "기록 완전성(log_complete)",
             _fmt(log_complete) if log_complete is not None else "?",
@@ -303,7 +308,7 @@ def _balance_section(v: Verdict) -> list[str]:
         _row("항목", "위반"),
         _row("---", "---:"),
         _row(f"잔고 불일치({detail})", _n(balance)),
-        _row("신선도 위반 체결(I7)", _n(_stale_fills(v))),
+        _row(f"신선도 위반 체결({STALE_FILL_INVARIANT})", _n(_stale_fills(v))),
     ]
     inv = _section(v, "invariants")
     if inv:

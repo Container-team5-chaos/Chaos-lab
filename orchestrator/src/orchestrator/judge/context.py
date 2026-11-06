@@ -3,27 +3,39 @@
 - run.json은 runner가 쓰고 judge는 읽기만 한다.
 - 같은 폴더의 marks.local.json(`judge mark`가 쓴다)은 run.json의 빈 칸만 채운다.
 - 위반은 모두 InputError(종료 코드 12)다.
+- extra_accounts는 발표자 user_id다(계약 정렬 명세 8). db는 psql 대상이다(명세 6).
 """
 
 from __future__ import annotations
 
 import json
 import re
-import uuid
 from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
 from .errors import InputError
-from .model import RUN_SCHEMA, Fault, RunContext, SpeedPoint, sha256_bytes
+from .model import (
+    RUN_SCHEMA,
+    USER_ID_RE,
+    DbTarget,
+    Fault,
+    RunContext,
+    SpeedPoint,
+    sha256_bytes,
+)
 
 __all__ = [
+    "DB_KEYS",
     "MARKS_LOCAL_NAME",
     "RUN_ID_RE",
+    "USER_ID_RE",
+    "DbTarget",
     "RunContext",
     "Fault",
     "SpeedPoint",
+    "check_user_id",
     "load_run",
 ]
 
@@ -44,10 +56,16 @@ OPTIONAL_KEYS = (
     "replay_speed",
     "extra_accounts",
     "obs",  # inject·운영자 관측값(5.2 4단계). `judge mark --obs`와 같은 모양
+    "db",  # psql 대상 {pod, container, user, database}(명세 6). 비밀번호는 받지 않는다
 )
 RUN_KEYS = frozenset(REQUIRED_KEYS + OPTIONAL_KEYS)
 K6_KEYS = frozenset({"job"})
 FAULT_KEYS = frozenset({"kind", "target", "start_ms", "end_ms"})  # 그 밖 키는 extra
+DB_KEYS = frozenset({"pod", "container", "user", "database"})
+# argv에 그대로 들어가므로 '-'로 시작하지 못하게 한다(옵션 주입 방지).
+POD_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$")  # DNS-1123 subdomain
+CONTAINER_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$")  # DNS-1123 label
+PG_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]{0,62}$")  # 따옴표 없는 PG 식별자
 MARKS_LOCAL_KEYS = frozenset(
     {"run_id", "marks", "faults", "replay_speed", "extra_accounts", "obs"}
 )
@@ -108,6 +126,7 @@ def load_run(path: str | Path) -> RunContext:
         replay_speed=_replay_speed(doc.get("replay_speed")),
         extra_accounts=_extra_accounts(doc.get("extra_accounts")),
         obs=_obs(doc.get("obs")),
+        db=_db(doc.get("db")),
         run_json=run_json,
         run_dir=run_dir,
         run_json_sha256=sha256_bytes(raw_bytes),
@@ -285,22 +304,55 @@ def _replay_speed(v: Any) -> tuple[SpeedPoint, ...]:
     return tuple(out)
 
 
+def check_user_id(v: Any, where: str) -> str:
+    """user_id 형식(USER_ID_RE)을 검사한다. CLI --extra-account도 이 함수를 쓴다."""
+    if not isinstance(v, str) or not USER_ID_RE.fullmatch(v):
+        raise InputError(
+            f"{where}: {v!r}는 user_id 형식이 아니다(영숫자로 시작, 64자 이하)"
+        )
+    return v
+
+
 def _extra_accounts(v: Any) -> tuple[str, ...]:
+    """발표자 user_id 목록(명세 8). 순서를 지키고 중복은 뺀다."""
     if v is None:
         return ()
     if not isinstance(v, list):
         raise InputError("run.json: extra_accounts는 배열이어야 한다")
     out: list[str] = []
     for i, a in enumerate(v):
-        try:
-            norm = str(uuid.UUID(a)) if isinstance(a, str) else None
-        except ValueError:
-            norm = None
-        if norm is None:
-            raise InputError(f"run.json: extra_accounts[{i}] {a!r}는 UUID가 아니다")
-        if norm not in out:
-            out.append(norm)
+        uid = check_user_id(a, f"run.json: extra_accounts[{i}]")
+        if uid not in out:
+            out.append(uid)
     return tuple(out)
+
+
+def _db(v: Any) -> DbTarget:
+    """psql 대상(명세 6). 값이 null이거나 키가 없으면 기본값이다."""
+    if v is None:
+        return DbTarget()
+    if not isinstance(v, dict):
+        raise InputError("run.json: db는 객체여야 한다")
+    if "password" in v:
+        raise InputError("run.json: db에 비밀번호를 넣지 않는다(로컬 소켓 trust 전제)")
+    _check_keys(v, DB_KEYS, "run.json db")
+    base = DbTarget()
+    checks = {
+        "pod": (POD_RE, "Pod 이름"),
+        "container": (CONTAINER_RE, "컨테이너 이름"),
+        "user": (PG_NAME_RE, "DB 사용자 이름"),
+        "database": (PG_NAME_RE, "DB 이름"),
+    }
+    got: dict[str, str | None] = {}
+    for k, (rx, what) in checks.items():
+        x = v.get(k)
+        if x is None:
+            got[k] = getattr(base, k)
+            continue
+        if not isinstance(x, str) or not rx.fullmatch(x):
+            raise InputError(f"run.json: db.{k} {x!r}는 {what} 형식이 아니다")
+        got[k] = x
+    return DbTarget(**got)
 
 
 def _obs(v: Any) -> dict[str, Any]:

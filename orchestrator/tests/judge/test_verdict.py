@@ -188,10 +188,10 @@ def specs_by_id():
 
 def test_count_check_class_sum_fail():
     spec = specs_by_id()["lost"]
-    r = evaluate_count_check(spec, {"LOST": 1, "PHANTOM_ACK": 2, "OK": 50})
+    r = evaluate_count_check(spec, {"LOST": 1, "REJECT_COMMITTED": 2, "OK": 50})
     assert r.outcome is FAIL and r.value == 3 and r.kind == "integrity"
     assert r.required is True and r.on_violation == "fail" and r.reasons == ()
-    assert r.detail["counts"] == {"FALSE_NOT_FOUND": 0, "LOST": 1, "PHANTOM_ACK": 2}
+    assert r.detail["counts"] == {"LOST": 1, "REJECT_COMMITTED": 2}
 
 
 def test_count_check_absent_classes_are_zero():
@@ -200,13 +200,12 @@ def test_count_check_absent_classes_are_zero():
 
 
 def test_interrupted_and_user_impact_do_not_fail():
-    """INTERRUPTED·UNRESOLVED_*·NOT_ENTERED는 돈 문제가 아니다(설계 5.3)."""
+    """INTERRUPTED·UNRESOLVED_*는 돈 문제가 아니다(설계 5.3, 명세 4)."""
     counts = {
         "OK": 100,
         "INTERRUPTED": 7,
         "UNRESOLVED_ABSENT": 2,
         "UNRESOLVED_COMMITTED": 1,
-        "NOT_ENTERED": 3,
     }
     specs = specs_by_id()
     ids = ("lost", "mismatch", "duplicates", "orphans", "protocol")
@@ -252,11 +251,11 @@ def test_count_check_sql_missing_section_is_db_error():
     spec = specs_by_id()["invariants"]
     counts = {n: 0 for n in spec["sql"]}
     assert evaluate_count_check(spec, counts).outcome is PASS
-    del counts["i5_cash"]
+    del counts["cash"]
     r = evaluate_count_check(spec, counts)
     assert r.outcome is INC and r.reasons == (R.DB_ERROR,)
-    assert r.detail["unavailable"] == {"i5_cash": R.DB_ERROR}
-    counts["i5_cash"] = None
+    assert r.detail["unavailable"] == {"cash": R.DB_ERROR}
+    counts["cash"] = None
     assert evaluate_count_check(spec, counts).reasons == (R.DB_ERROR,)
 
 
@@ -264,8 +263,8 @@ def test_count_check_partial_violation_still_fails():
     """일부만 알아도 이미 위반이면 FAIL(돈 FAIL 우선을 지킨다)."""
     spec = specs_by_id()["invariants"]
     counts = {n: 0 for n in spec["sql"]}
-    counts["i2"] = 2
-    del counts["i5_qty"]
+    counts["arith"] = 2
+    del counts["qty"]
     r = evaluate_count_check(spec, counts)
     assert r.outcome is FAIL and r.value == 2 and r.detail["decided_by_partial"]
 
@@ -275,7 +274,7 @@ def test_count_check_unavailable_names():
     unavailable = {"LOST": R.ACCOUNT_SET_MISMATCH}
     r = evaluate_count_check(spec, {"LOST": 5}, unavailable=unavailable)
     assert r.outcome is INC and r.reasons == (R.ACCOUNT_SET_MISMATCH,)
-    r = evaluate_count_check(spec, {"FALSE_NOT_FOUND": 1}, unavailable=unavailable)
+    r = evaluate_count_check(spec, {"REJECT_COMMITTED": 1}, unavailable=unavailable)
     assert r.outcome is FAIL and r.value == 1
 
 
@@ -293,7 +292,7 @@ def test_count_check_requires():
 def test_count_check_fault_effect_forms():
     sub = {
         "id": "crash_seen_by_k6",
-        "class_sub": ["after_commit", "lookup"],
+        "class_sub": ["after_commit", "after_503"],
         "op": ">=",
         "value": 1,
     }
@@ -469,7 +468,7 @@ def make_verdict(**kw):
             "log_complete": True,
             "classes": {"OK": 98, "UNRESOLVED_ABSENT": 2},
             "subs": {"clean": 90, "after_commit": 8},
-            "invariants": {"i2": 0, "i5_cash": 0},
+            "invariants": {"cash": 0, "qty": 0},
             "examples": {"UNRESOLVED_ABSENT": ["k1", "k2"]},
         },
         client={"phases": {"baseline": {"n": 4000, "ack_p95_ms": Decimal("41.5")}}},
@@ -552,14 +551,14 @@ def test_build_verdict_combines_and_merges_warnings():
     v = make_verdict(
         checks=[*checks[:3], *k6],
         guards=[grd("fill_coverage", FAIL)],
-        warnings=[R.APP_MAX_AGE_DIFFERS, R.APP_MAX_AGE_DIFFERS],
+        warnings=[R.SNAPSHOT_LARGE, R.SNAPSHOT_LARGE],
         integrity={"subs": {"after_503": 1}},
     )
     assert v.verdict is FAIL and v.reasons == (R.INTEGRITY_VIOLATION,)
     assert v.warnings == (
-        R.APP_MAX_AGE_DIFFERS,
         R.K6_THRESHOLD_DISAGREES,
         R.ROLLBACK_REPLY_COMMITTED,
+        R.SNAPSHOT_LARGE,
     )
 
 
