@@ -27,6 +27,9 @@ class Injector(Protocol):
     def cleanup(self, run_id: str) -> list[str]:
         """run_id 라벨이 붙은 Chaos 리소스를 모두 지우고 지운 이름 목록을 돌려준다."""
 
+    def leftovers(self) -> list[str]:
+        """우리 라벨이 붙은 Chaos 리소스 중 아직 남아 있는 것(run 무관)."""
+
 
 class MockInjector:
     """클러스터 없이 로직을 검증하기 위한 가짜 구현."""
@@ -47,6 +50,9 @@ class MockInjector:
         for n in names:
             del self.resources[n]
         return names
+
+    def leftovers(self) -> list[str]:
+        return list(self.resources)
 
 
 class ChaosMeshInjector:
@@ -102,6 +108,19 @@ class ChaosMeshInjector:
                         raise
                 deleted.append(name)
         return deleted
+
+    def leftovers(self) -> list[str]:
+        names = []
+        for plural in KIND_PLURALS.values():
+            items = self.api.list_namespaced_custom_object(
+                CHAOS_GROUP,
+                CHAOS_VERSION,
+                self.namespace,
+                plural,
+                label_selector=LABEL_KEY,
+            )["items"]
+            names += [i["metadata"]["name"] for i in items]
+        return names
 
 
 def inject(injector: Injector, run_id: str, step: int, fault: dict) -> str:

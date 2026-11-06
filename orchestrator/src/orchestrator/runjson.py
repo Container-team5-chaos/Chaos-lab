@@ -32,17 +32,25 @@ class RunFile:
             "schema": "chaos.run/v1",
             "run_id": run_id,
             "experiment": scenario.get("name", "unnamed"),
-            "criteria": scenario.get(
-                "criteria", "../../experiments/criteria/default.yaml"
-            ),
+            "criteria": self._criteria(scenario, scenario_path),
             "k6": {"job": f"k6-{run_id}"},
             "marks": {},
             "faults": [],
         }
         if scenario_path:
-            data["scenario"] = scenario_path
+            data["scenario"] = str(Path(scenario_path).resolve())
         self.write(data)
         return data
+
+    @staticmethod
+    def _criteria(scenario: dict, scenario_path: str | None) -> str:
+        """기준 파일 경로. 시나리오 파일 기준 상대 경로를 절대 경로로 바꿔 적는다.
+
+        run.json은 PVC(runs/)에, 시나리오는 이미지 안에 있어 위치가 다르기 때문이다.
+        """
+        base = Path(scenario_path).resolve().parent if scenario_path else Path.cwd()
+        crit = scenario.get("criteria", "../criteria/default.yaml")
+        return str((base / crit).resolve())
 
     def read(self) -> dict:
         return json.loads(self.path.read_text(encoding="utf-8"))
