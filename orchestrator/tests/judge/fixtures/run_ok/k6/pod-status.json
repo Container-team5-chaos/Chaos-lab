@@ -1,0 +1,9 @@
+{
+  "pod": "k6-r-offline-ok-x7k2p",
+  "containers": {
+    "k6": {
+      "exitCode": 0,
+      "reason": "Completed"
+    }
+  }
+}

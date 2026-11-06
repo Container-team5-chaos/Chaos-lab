@@ -1,0 +1,6 @@
+# 오프라인 e2e 픽스처 기준(test_pipeline_offline.py). 실제 default.yaml을 상속하고 작은 run에 맞게 표본 기준만 낮춘다
+extends: ../../../../../experiments/criteria/default.yaml
+phases: {warmup: 2s}
+coverage: {min_filled: {tail: 5, steady: 5}, min_sell_filled: 2}
+# 구간 p95·오류율(설계 5.5)은 표본 400건이 필요하고 1차 미구현이라 보고만 한다(demo-min과 같다)
+checks: [{id: order_p95_k6, required: false}, {id: order_err_k6, required: false}]
