@@ -15,8 +15,9 @@ from enum import Enum
 from .cleanup import recover
 from .gates import AlwaysOpen, Gate
 from .inject import Injector
-from .judge import Judge
+from .judging import Judge
 from .observe import LoadGenerator
+from .runjson import RunFile, check_run_id
 from .store import StateStore
 
 
@@ -41,6 +42,7 @@ class Runner:
         load: LoadGenerator,
         judge: Judge,
         gate: Gate | None = None,
+        runs_dir: str = "runs",
         sleep=time.sleep,
         now=time.time,
     ):
@@ -49,6 +51,7 @@ class Runner:
         self.load = load
         self.judge = judge
         self.gate = gate or AlwaysOpen()
+        self.runs_dir = runs_dir
         self.sleep = sleep
         self.now = now
         self.state: dict = {}
@@ -61,17 +64,25 @@ class Runner:
         self.store.save(self.state)
 
     # --- 실행 -----------------------------------------------------------
-    def run(self, scenario: dict, exp_id: str | None = None) -> dict:
+    def run(
+        self,
+        scenario: dict,
+        run_id: str | None = None,
+        scenario_path: str | None = None,
+    ) -> dict:
         # 1) 이전 실험이 끊겼으면 주입 없이 정리만 하고 끝난 것으로 기록
         recover(self.store, self.injector, now=self.now)
 
-        exp_id = exp_id or f"exp-{uuid.uuid4().hex[:8]}"
+        run_id = check_run_id(run_id or f"r-{uuid.uuid4().hex[:8]}")
+        run_file = RunFile(self.runs_dir, run_id)
+        run_file.create(run_id, scenario, scenario_path)
         durations = scenario.get("durations", {})
         self.state = {
-            "exp_id": exp_id,
+            "run_id": run_id,
             "scenario_name": scenario.get("name", "unnamed"),
             "started_at": self.now(),
             "chaos_resources": [],
+            "run_json": str(run_file.path),
         }
         try:
             self._enter(Phase.PRECHECK)
@@ -81,12 +92,14 @@ class Runner:
                 return self.state
 
             self._enter(Phase.WARMUP)
-            self.load.start(exp_id, scenario)
+            self.load.start(run_id, scenario)
             self.sleep(durations.get("warmup", 0))
 
             self._enter(Phase.INJECTING)
+            run_file.mark("inject_start")
             for step, fault in enumerate(scenario.get("faults", [])):
-                name = self.injector.apply(exp_id, step, fault)
+                name = self.injector.apply(run_id, step, fault)
+                run_file.add_fault(fault.get("kind", "?"), fault.get("target", name))
                 if name not in self.state["chaos_resources"]:
                     self.state["chaos_resources"].append(name)
                     self.store.save(self.state)
@@ -95,12 +108,13 @@ class Runner:
             self.sleep(durations.get("observe", 0))
 
             self._enter(Phase.RECOVERING)
-            self.injector.cleanup(exp_id)
+            self.injector.cleanup(run_id)
+            run_file.mark("inject_end")
             self.sleep(durations.get("recover", 0))
-            self.load.stop(exp_id)
+            self.load.stop(run_id)
 
             self._enter(Phase.JUDGING)
-            verdict = self.judge.evaluate(exp_id, self.state["started_at"], self.now())
+            verdict = self.judge.evaluate(run_file.path, run_id)
             self._enter(
                 Phase.DONE,
                 verdict={"passed": verdict.passed, "details": verdict.details},
@@ -115,10 +129,10 @@ class Runner:
     def _abort(self, reason: str) -> None:
         interrupted = self.state.get("phase")
         try:
-            removed = self.injector.cleanup(self.state["exp_id"])
+            removed = self.injector.cleanup(self.state["run_id"])
         finally:
             with contextlib.suppress(Exception):
-                self.load.stop(self.state["exp_id"])
+                self.load.stop(self.state["run_id"])
         self._enter(
             Phase.ABORTED,
             aborted_from=interrupted,

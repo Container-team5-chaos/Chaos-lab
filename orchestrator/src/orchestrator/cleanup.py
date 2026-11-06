@@ -17,7 +17,7 @@ def recover(store: StateStore, injector: Injector, now=time.time) -> dict | None
     if state is None or state.get("phase") in TERMINAL:
         return None
     interrupted_at = state["phase"]
-    removed = injector.cleanup(state["exp_id"])
+    removed = injector.cleanup(state["run_id"])
     state.update(
         phase="ABORTED",
         aborted_from=interrupted_at,

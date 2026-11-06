@@ -1,6 +1,6 @@
 def summary(state: dict) -> str:
     lines = [
-        f"실험 {state['exp_id']} ({state.get('scenario_name', '-')})",
+        f"실험 {state['run_id']} ({state.get('scenario_name', '-')})",
         f"결과 phase: {state['phase']}",
     ]
     if state.get("aborted_from"):

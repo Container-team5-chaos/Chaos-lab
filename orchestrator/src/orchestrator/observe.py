@@ -4,21 +4,21 @@ from typing import Protocol
 
 
 class LoadGenerator(Protocol):
-    def start(self, exp_id: str, scenario: dict) -> None: ...
+    def start(self, run_id: str, scenario: dict) -> None: ...
 
-    def stop(self, exp_id: str) -> None: ...
+    def stop(self, run_id: str) -> None: ...
 
 
 class MockLoad:
     def __init__(self):
         self.running: set[str] = set()
 
-    def start(self, exp_id: str, scenario: dict) -> None:
-        self.running.add(exp_id)
+    def start(self, run_id: str, scenario: dict) -> None:
+        self.running.add(run_id)
 
-    def stop(self, exp_id: str) -> None:
-        self.running.discard(exp_id)
+    def stop(self, run_id: str) -> None:
+        self.running.discard(run_id)
 
 
-def collect(load: LoadGenerator, exp_id: str, scenario: dict) -> None:
-    load.start(exp_id, scenario)
+def collect(load: LoadGenerator, run_id: str, scenario: dict) -> None:
+    load.start(run_id, scenario)
