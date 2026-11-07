@@ -1,0 +1,78 @@
+# 시세 stub — 업비트 수집기(C)가 준비되기 전까지 사용
+# Redis에 price:KRW-BTC = {"price": "<문자열>", "ts": <epoch ms>, "src": "stub"} 를 1초마다 기록한다.
+# (주문 API 문서 7절 형식 + 출처 표시 src. 주문 서비스는 price·ts만 읽는다)
+#
+# 안전장치
+# - 다른 쓰기 주체(수집기)의 신선한 시세가 보이면 덮어쓰지 않고 스스로 멈춘다(yield).
+#   멈춘 뒤에는 수집기가 죽어도 대신 쓰지 않는다 → 수집기 장애가 stub에 가려지지 않음
+# - Redis 호출마다 3초 타임아웃, 15초 넘게 쓰지 못하면 liveness probe가 재시작
+#
+# 수집기가 배포되면 삭제: PRICE_STUB=0 infra/local/up.sh
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: price-stub
+  namespace: exchange
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: price-stub
+  template:
+    metadata:
+      labels:
+        app: price-stub
+        chaos.exchange/protected: "true"
+    spec:
+      containers:
+        - name: price-stub
+          image: redis:7-alpine
+          env:
+            - name: MARKET
+              value: KRW-BTC
+            - name: START_PRICE
+              value: "95000000"
+          command: ["sh", "-c"]
+          args:
+            - |
+              KEY="price:$MARKET"
+              rc() { timeout 3 redis-cli -h redis "$@" 2>/dev/null; }
+              date +%s > /tmp/last_ok
+              price="$START_PRICE"
+              while true; do
+                # Redis 서버 시각(초, 마이크로초)으로 ms 단위 ts를 만든다
+                set -- $(rc TIME)
+                if [ -n "${1:-}" ] && [ -n "${2:-}" ]; then
+                  ts=$(( $1 * 1000 + $2 / 1000 ))
+                  cur="$(rc GET "$KEY")"
+                  case "$cur" in
+                    ""|*'"src": "stub"'*) ;;
+                    *)
+                      cur_ts=$(printf '%s' "$cur" | sed -nE 's/.*"ts": *([0-9]+).*/\1/p')
+                      if [ -n "$cur_ts" ] && [ $(( ts - cur_ts )) -lt 5000 ]; then
+                        echo "다른 쓰기 주체의 시세 감지: $cur → stub 중지"
+                        touch /tmp/yielded
+                        exec sleep 2147483647
+                      fi
+                      ;;
+                  esac
+                  # ±0.1% 이내로 무작위 변동
+                  price=$(awk -v p="$price" -v s="$RANDOM" 'BEGIN{srand(s); printf "%d", p*(1+(rand()-0.5)/500)}')
+                  if rc SET "$KEY" "{\"price\": \"$price\", \"ts\": $ts, \"src\": \"stub\"}" >/dev/null; then
+                    date +%s > /tmp/last_ok
+                  fi
+                fi
+                sleep 1
+              done
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - '[ -f /tmp/yielded ] || [ $(( $(date +%s) - $(cat /tmp/last_ok 2>/dev/null || echo 0) )) -lt 15 ]'
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi

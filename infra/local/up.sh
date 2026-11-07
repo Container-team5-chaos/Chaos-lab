@@ -14,6 +14,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 KPS_CHART_VERSION="92.21.1"
 CHAOS_MESH_CHART_VERSION="2.8.7"
 
+# 업비트 수집기(C)가 나오기 전까지 시세 stub 사용. 수집기 배포 후에는 PRICE_STUB=0 으로 실행
+PRICE_STUB="${PRICE_STUB:-1}"
+
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -80,6 +83,17 @@ install_data() {
   k -n exchange rollout status deployment/redis --timeout=120s
 }
 
+install_price_stub() {
+  if [ "$PRICE_STUB" = "1" ]; then
+    log "시세 stub 배포 (price:KRW-BTC 1초마다 갱신)"
+    k apply -f "$ROOT/infra/k8s/stubs/price-stub.yaml"
+    k -n exchange rollout status deployment/price-stub --timeout=120s
+  else
+    log "PRICE_STUB=0 — 시세 stub 제거"
+    k delete -f "$ROOT/infra/k8s/stubs/price-stub.yaml" --ignore-not-found
+  fi
+}
+
 verify() {
   log "설치 확인"
   local failed=0
@@ -89,7 +103,7 @@ verify() {
   k -n chaos-mesh rollout status daemonset/chaos-daemon --timeout=120s || failed=1
   k -n exchange exec statefulset/postgres -- pg_isready -U exchange -d exchange >/dev/null || failed=1
   [ "$(k -n exchange exec deploy/redis -- redis-cli ping)" = "PONG" ] || failed=1
-  # Chaos Mesh CRD가 등록됐는지 (주입기가 PodChaos를 만들 수 있어야 함)
+  # Chaos Mesh CRD가 등록됐는지 확인(주입기가 PodChaos를 만들 수 있어야 함)
   k get crd podchaos.chaos-mesh.org networkchaos.chaos-mesh.org >/dev/null || failed=1
   [ "$failed" -eq 0 ] || die "일부 구성 요소가 준비되지 않았습니다. 위 로그를 확인하세요"
 }
@@ -121,5 +135,6 @@ add_repos
 install_monitoring
 install_chaos_mesh
 install_data
+install_price_stub
 verify
 summary
