@@ -2,7 +2,7 @@
 # 로컬 환경 점검 + 장애 주입 스모크 테스트
 #
 #   1. 환경: 노드, Prometheus, Chaos Mesh
-#   2. 데이터: DB 스키마·계좌, Redis 시세(형식·신선도·갱신)
+#   2. 데이터: DB 스키마·계좌, Redis 시세(형식·신선도·갱신·PUBLISH)
 #   3. Prometheus: 쿼리 가능, k6 remote write receiver 켜짐
 #   4. PodChaos: Pod 1개만 정확히 종료, 같은 이름 재생성 시 중복 0, 정리 멱등
 #   5. 보호 라벨: chaos.exchange/protected Pod는 주입 대상에서 제외
@@ -81,8 +81,8 @@ if [ -z "$raw" ]; then
 else
   pass "Redis price:KRW-BTC 존재: $raw"
   if printf '%s' "$raw" | grep -Eq '"price": *"[0-9.]+"'; then pass "price가 문자열 (API 문서 7절)"; else fail "price가 문자열 (API 문서 7절)"; fi
-  if printf '%s' "$raw" | grep -q '"src": "stub"'; then
-    printf '  \033[33mINFO\033[0m 시세 출처: stub (수집기 배포 후에는 PRICE_STUB=0)\n'
+  if k -n exchange get deployment price-stub >/dev/null 2>&1; then
+    printf '  \033[33mINFO\033[0m 시세 stub 배포됨 (수집기 배포 후에는 PRICE_STUB=0)\n'
   fi
 
   ts1="$(price_ts)"
@@ -97,6 +97,10 @@ else
   sleep 3
   ts2="$(price_ts)"
   if [ -n "$ts2" ] && [ -n "$ts1" ] && [ "$ts2" -gt "$ts1" ]; then pass "시세가 계속 갱신됨"; else fail "시세가 계속 갱신됨 (3초 동안 ts 변화 없음)"; fi
+
+  # 푸시 서버가 구독하는 채널로도 나가는지 (3초 동안 구독)
+  published="$(k -n exchange exec deploy/redis -- timeout 3 redis-cli SUBSCRIBE price:KRW-BTC 2>/dev/null | tr -d '\r' | grep -c '"ts"')"
+  if [ "${published:-0}" -ge 1 ]; then pass "PUBLISH price:KRW-BTC 수신 (3초 동안 ${published}건)"; else fail "PUBLISH price:KRW-BTC 수신 (푸시 서버가 시세를 못 받음)"; fi
 fi
 
 # ---------------------------------------------------------------------------

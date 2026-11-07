@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # 실험 시작 전 DB 초기화: 주문·포지션·계좌를 비우고 테스트 사용자 1,000명에게 1,000만 원씩 다시 지급
+# (B의 정합성 검사: 보낸 주문 ID와 DB 대조, 잔고 불변식 → 깨끗한 시작 상태가 기준)
+#
 # 사용법: infra/local/reset-db.sh [-y]
 #   -y  확인 질문 없이 실행
 # 실험 중(Chaos 리소스나 실행 중인 k6 Job이 있음)이면 판정이 깨지므로 실행하지 않는다.
-
 set -euo pipefail
 
 CLUSTER_NAME="${CLUSTER_NAME:-chaos-lab}"
