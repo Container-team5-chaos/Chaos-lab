@@ -30,8 +30,8 @@ from orchestrator.inject import (  # noqa: E402
 CONTEXT = os.environ.get("KIND_CONTEXT", "kind-chaos-lab")
 IMAGE = "registry.k8s.io/pause:3.10"
 READY_TIMEOUT = 180  # 이미지 pull 포함
-INJECT_TIMEOUT = 60  # workbook: 주입 확인 ≤ 60초
-CLEANUP_LIMIT = 60  # workbook: 정리 소요 ≤ 60초
+INJECT_TIMEOUT = 60  # 주입이 적용될 때까지 기다리는 상한(초)
+CLEANUP_LIMIT = 60  # ChaosMeshInjector 기본 정리 대기 상한과 같음
 
 
 def wait_until(predicate, timeout: float, interval: float = 2.0) -> bool:
