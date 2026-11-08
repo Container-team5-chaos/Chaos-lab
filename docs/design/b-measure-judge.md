@@ -586,13 +586,13 @@ checks: [{id: order_p95_k6, required: false}, {id: order_err_k6, required: false
 **7.6 산출물**: 노트북 `runs/<run_id>/`(gitignore). 공유는 S3 `results/`(L422)에 손으로 올린다(쓰기 권한 미요청, L1001). 대표 `verdict.json`, `report.md`만 팀 합의 뒤 `docs/results/`에 커밋한다.
 
 ## 8. 테스트
-- **CI(pytest)**: k6log(JSONL v2: 깨진 줄, `run_start` 2개, Counter와 줄 수 차이, `token` 키, key·acct ≠ body), classify 골든, criteria 병합 체인 스냅샷(옛 키 거부), invariants 스냅샷 픽스처(cash·qty·avg·arith 경계), combine(돈 FAIL 우선, N/A, INTERRUPTED), 결정성(2회·줄 섞기 → 같은 digest), CLI 종료 코드.
+- **기본 pytest(로컬)**: k6log(JSONL v2: 깨진 줄, `run_start` 2개, Counter와 줄 수 차이, `token` 키, key·acct ≠ body), classify 골든, criteria 병합 체인 스냅샷(옛 키 거부), invariants 스냅샷 픽스처(cash·qty·avg·arith 경계), combine(돈 FAIL 우선, N/A, INTERRUPTED), 결정성(2회·줄 섞기 → 같은 digest), CLI 종료 코드.
 - **로컬 `-m pg`**: 실제 스키마 `workloads/order/db/schema.sql`·`seed.sql`을 docker `postgres:16`(서비스와 같은 이미지)에 그대로 넣고 위반을 하나씩 심는다(krw, positions volume, avg_price, amount 조작, 중복 INSERT 불가). 우리 픽스처 스키마는 두지 않는다. 접두어만 `docker exec -i pgtest`로 바꾼다.
 - **로컬 `-m k6`**: 가짜 API 스위치마다 30s run → 기대 클래스 수 일치. **클러스터 스모크**: `PROFILE=smoke`로 전 경로.
-- **실서비스 e2e(`-m e2e`, CI 제외)**: docker `postgres:16` + `redis:7`, `workloads/order` 앱을 별도 venv uvicorn으로 띄운다(코드는 고치지 않는다). 파이썬 클라이언트가 JSONL v2를 쓰며 정상, 재요청, 422, stale_price 뒤 재시도, 동시 같은 키를 보낸다 → `docker exec psql` 번들 → evaluate PASS. krw를 바꾸면 FAIL(INTEGRITY_VIOLATION).
+- **실서비스 e2e(`-m e2e`, 기본 실행에서 제외)**: docker `postgres:16` + `redis:7`, `workloads/order` 앱을 별도 venv uvicorn으로 띄운다(코드는 고치지 않는다). 파이썬 클라이언트가 JSONL v2를 쓰며 정상, 재요청, 422, stale_price 뒤 재시도, 동시 같은 키를 보낸다 → `docker exec psql` 번들 → evaluate PASS. krw를 바꾸면 FAIL(INTEGRITY_VIOLATION).
 - **골든(최소 22건)**: 행렬 칸 전부, OK 세부 5종, BODY_MISMATCH, 멱등 위반 4종, DUP_ORDER, FILL_STATE, ORPHAN, INTERRUPTED(커밋·미커밋), PROTOCOL, 503 stale_price 뒤 재시도 체결, 422 거절 D0, 응답 원문 못 읽음. 오프라인 픽스처(`fixtures/run_ok/`)도 v2로 다시 만든다.
 - **가짜 order-api**: 표준 라이브러리 `ThreadingHTTPServer`로 `POST /orders`, `GET /accounts/{user_id}`를 흉내 낸다. 스위치 `close_after_commit`, `commit_then_not_ready`, `not_ready`, `stale_price`, `resend_diff`, `delay_ms`. 스냅샷을 psql과 같은 `--@` + CSV로 낸다.
-- **CI 잡**: `.github/workflows/ci.yml` `test`(python 3.11, `pytest -q -m "not pg and not k6 and not e2e"`), pyproject markers에 `e2e`.
+- **실행**: 기본은 로컬 `pytest -q -m "not pg and not k6 and not e2e"`(python 3.11)다. 팀 CI에는 테스트 작업을 넣지 않는다(팀 합의 전). pyproject markers에 `e2e`.
 
 ## 9. 일정
 
