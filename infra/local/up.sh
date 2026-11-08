@@ -13,6 +13,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # 버전 고정: 바꿀 때는 values 파일 상단 주석도 함께 수정
 KPS_CHART_VERSION="92.21.1"
 CHAOS_MESH_CHART_VERSION="2.8.7"
+METRICS_SERVER_CHART_VERSION="3.14.0"
 
 # 업비트 수집기(C)가 나오기 전까지 시세 stub 사용. 수집기 배포 후에는 PRICE_STUB=0 으로 실행
 PRICE_STUB="${PRICE_STUB:-1}"
@@ -48,7 +49,18 @@ add_repos() {
   log "Helm 저장소 등록"
   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts --force-update >/dev/null
   helm repo add chaos-mesh https://charts.chaos-mesh.org --force-update >/dev/null
-  helm repo update prometheus-community chaos-mesh >/dev/null
+  helm repo add metrics-server https://kubernetes-sigs.github.io/metrics-server/ --force-update >/dev/null
+  helm repo update prometheus-community chaos-mesh metrics-server >/dev/null
+}
+
+# HPA가 CPU를 읽기 위한 metrics-server (없으면 HPA TARGETS가 <unknown>)
+install_metrics_server() {
+  log "metrics-server $METRICS_SERVER_CHART_VERSION 설치 (namespace: kube-system)"
+  h upgrade --install metrics-server metrics-server/metrics-server \
+    --namespace kube-system \
+    --version "$METRICS_SERVER_CHART_VERSION" \
+    --values "$ROOT/infra/helm/values/metrics-server.yaml" \
+    --wait --timeout 5m
 }
 
 install_monitoring() {
@@ -105,6 +117,8 @@ verify() {
   [ "$(k -n exchange exec deploy/redis -- redis-cli ping)" = "PONG" ] || failed=1
   # Chaos Mesh CRD가 등록됐는지 확인(주입기가 PodChaos를 만들 수 있어야 함)
   k get crd podchaos.chaos-mesh.org networkchaos.chaos-mesh.org >/dev/null || failed=1
+  # HPA용 리소스 지표 API가 응답하는지 (metrics-server 기동 후 첫 수집까지 수십 초 걸림)
+  k wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io --timeout=120s >/dev/null || failed=1
   [ "$failed" -eq 0 ] || die "일부 구성 요소가 준비되지 않았습니다. 위 로그를 확인하세요"
 }
 
@@ -132,6 +146,7 @@ EOF
 check_deps
 create_cluster
 add_repos
+install_metrics_server
 install_monitoring
 install_chaos_mesh
 install_data
