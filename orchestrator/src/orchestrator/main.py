@@ -12,13 +12,23 @@ from pathlib import Path
 import yaml
 
 from .cleanup import recover
-from .gates import AlwaysOpen
+from .gates import (
+    AlwaysOpen,
+    CompositeGate,
+    http_ready,
+    no_leftover_chaos,
+    observability_up,
+    previous_cleanup_ok,
+    price_fresh,
+    redis_price_getter,
+)
 from .inject import MockInjector
 from .judging import ChaosJudge, MockJudge
 from .observe import MockLoad
 from .report import summary
 from .runner import Runner
 from .store import DEFAULT_PATH, StateStore
+from .watch import AlwaysHealthy, PrometheusWatch
 
 
 def _build(mock: bool, namespace: str):
@@ -38,6 +48,12 @@ def main(argv=None) -> int:
     )
     p.add_argument("--namespace", default="exchange")
     p.add_argument("--runs-dir", default="runs")
+    p.add_argument(
+        "--prometheus", default=None, help="기본: 클러스터 안 kube-prometheus-stack"
+    )
+    p.add_argument(
+        "--no-gate", action="store_true", help="시작 게이트 생략 (로컬 디버깅용)"
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
     r.add_argument("scenario")
@@ -60,14 +76,33 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGTERM, _term)
 
     scenario = yaml.safe_load(Path(args.scenario).read_text(encoding="utf-8")) or {}
-    runner = Runner(store, injector, load, judge, AlwaysOpen(), runs_dir=args.runs_dir)
+    if args.mock:
+        watch, gate = AlwaysHealthy(), AlwaysOpen()
+    else:
+        watch = (
+            PrometheusWatch(args.prometheus) if args.prometheus else PrometheusWatch()
+        )
+        gate = CompositeGate(
+            {
+                "previous_cleanup": previous_cleanup_ok(store),
+                "no_leftover_chaos": no_leftover_chaos(injector),
+                "order_ready": http_ready(),
+                "price_fresh": price_fresh(redis_price_getter()),
+                "prometheus": observability_up(watch),
+            }
+        )
+    if args.no_gate:
+        gate = AlwaysOpen()
+    runner = Runner(
+        store, injector, load, judge, gate, watch=watch, runs_dir=args.runs_dir
+    )
     try:
         state = runner.run(scenario, run_id=args.run_id, scenario_path=args.scenario)
     except BaseException:
         print(summary(store.load()), file=sys.stderr)
         raise
     print(summary(state))
-    return 0 if state["phase"] == "DONE" and state["verdict"]["passed"] else 1
+    return {"PASSED": 0, "FAILED": 10, "INCONCLUSIVE": 11}.get(state.get("result"), 1)
 
 
 if __name__ == "__main__":

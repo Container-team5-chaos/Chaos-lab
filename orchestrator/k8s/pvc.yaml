@@ -1,0 +1,11 @@
+# state.json과 runs/<run_id>/를 Pod 재시작 후에도 남기는 저장소
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: chaos-orchestrator-state
+  namespace: exchange
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi

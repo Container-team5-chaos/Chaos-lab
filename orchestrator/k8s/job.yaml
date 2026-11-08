@@ -1,0 +1,42 @@
+# 실험 1회 = Job 1개. RUN_ID를 바꿔서 적용한다.
+#   sed "s/__RUN_ID__/r-$(date +%m%d%H%M)/" orchestrator/k8s/job.yaml | kubectl apply -f -
+#
+# Pod가 지워지면 Job이 같은 RUN_ID로 대체 Pod를 띄운다.
+# 대체 Pod는 state.json을 보고 주입 없이 정리만 한 뒤 ABORTED로 끝낸다 (시나리오 5-b).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: chaos-run-__RUN_ID__
+  namespace: exchange
+  labels:
+    app.kubernetes.io/name: chaos-orchestrator
+    chaos/run-id: __RUN_ID__
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: chaos-orchestrator
+        chaos/run-id: __RUN_ID__
+    spec:
+      serviceAccountName: chaos-orchestrator
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: orchestrator
+          image: chaos-orchestrator:dev
+          imagePullPolicy: IfNotPresent
+          args:
+            - --namespace=exchange
+            - --runs-dir=/var/lib/orchestrator/runs
+            - run
+            - /app/experiments/scenarios/pod-kill.yaml
+            - --run-id=__RUN_ID__
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/orchestrator
+      volumes:
+        - name: state
+          persistentVolumeClaim:
+            claimName: chaos-orchestrator-state
