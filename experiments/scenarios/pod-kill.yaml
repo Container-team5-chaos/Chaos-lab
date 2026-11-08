@@ -10,6 +10,6 @@ faults:
       action: pod-kill
       mode: one
       selector:
-        namespaces: [chaos-lab]
+        namespaces: [exchange]
         labelSelectors:
           app: order
