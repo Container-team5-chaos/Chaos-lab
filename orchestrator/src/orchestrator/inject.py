@@ -38,9 +38,8 @@ def with_safety_selector(spec: dict) -> dict:
 class CleanupIncomplete(RuntimeError):
     """정리 기한 안에 Chaos 리소스가 사라지지 않음 (설계의 cleanup = INCOMPLETE).
 
-    설계: 다음 run은 이전 run 정리 상태가 INCOMPLETE면 시작을 거부한다.
-    지금 runner에서는 예외가 올라가 실험이 DONE/ABORTED로 기록되지 않고,
-    다음 실행의 recover()가 다시 정리를 시도한다 (정리될 때까지 새 주입 없음).
+    runner의 safe_cleanup()이 이 예외를 잡아 state.json에 cleanup=INCOMPLETE로 기록하고,
+    다음 run은 시작 게이트(previous_cleanup)에서 막힌다.
     """
 
     def __init__(self, run_id: str, remaining: list[str]):
@@ -168,6 +167,7 @@ class ChaosMeshInjector:
                     raise
 
         # DELETE 성공 ≠ 정리 완료. finalizer가 풀려 목록에서 사라질 때까지 기다린다.
+        # (안 기다리면 cleanup=OK로 기록됐는데 다음 run의 no_leftover_chaos 게이트가 막힌다)
         deadline = self.clock() + self.cleanup_timeout
         while remaining := self._list(run_id):
             if self.clock() >= deadline:

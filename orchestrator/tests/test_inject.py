@@ -2,7 +2,7 @@
 
 import pytest
 
-from orchestrator.cleanup import recover
+from orchestrator.cleanup import recover, safe_cleanup
 from orchestrator.inject import (
     LABEL_KEY,
     PROTECTED_LABEL,
@@ -46,7 +46,8 @@ class FakeApi:
     def list_namespaced_custom_object(
         self, group, version, namespace, plural, label_selector
     ):
-        k, v = label_selector.split("=")
+        # "key=value" 또는 "key"(라벨 존재) 둘 다 지원
+        k, _, v = label_selector.partition("=")
         items = []
         for key, obj in list(self.objects.items()):
             if key[0] != plural:
@@ -56,7 +57,8 @@ class FakeApi:
                     del self.objects[key]  # finalizer가 풀려 실제로 사라짐
                     continue
                 obj["deleting"] -= 1
-            if obj["body"]["metadata"]["labels"].get(k) == v:
+            labels = obj["body"]["metadata"]["labels"]
+            if k in labels and (not v or labels[k] == v):
                 items.append(obj["body"])
         return {"items": items}
 
@@ -107,7 +109,7 @@ def test_safety_selector_excludes_protected_and_k6():
 
 
 def test_safety_selector_keeps_selector_and_original():
-    """기존 선택자는 유지하고 원본 시나리오는 바꾸지 않는다."""
+    """기존 선택자는 유지하고, 원본 시나리오는 바꾸지 않는다."""
     spec = with_safety_selector(FAULT["spec"])
     assert spec["selector"]["labelSelectors"] == {"app": "order"}
     assert spec["mode"] == "one"
@@ -220,22 +222,46 @@ def test_cleanup_raises_incomplete_after_timeout():
     assert clock.t <= 6  # 무기한 기다리지 않는다
 
 
-def test_incomplete_cleanup_keeps_state_and_next_recover_retries(tmp_path):
-    """정리에 실패하면 ABORTED로 덮이지 않고, 다음 recover가 다시 정리한다."""
+def test_leftovers_includes_terminating_until_cleanup_finishes():
+    """삭제 중(Terminating)인 리소스도 leftovers에 보이고, cleanup이 끝나면 비어 있다."""
+    api = FakeApi(finalizer_polls=3)
+    injector, _ = make(api)
+    injector.apply("r-1", 0, FAULT)
+    api.delete_namespaced_custom_object(
+        "chaos-mesh.org", "v1alpha1", "exchange", "podchaos", "r-1-s0"
+    )
+    assert injector.leftovers() == ["r-1-s0"]
+    injector.cleanup("r-1")
+    assert injector.leftovers() == []
+
+
+def test_safe_cleanup_records_incomplete_on_timeout():
+    """기한 초과는 runner의 safe_cleanup에서 INCOMPLETE로 기록된다 (예외가 밖으로 나가지 않음)."""
+    api = FakeApi(finalizer_polls=10_000)
+    injector, _ = make(api, timeout=3)
+    injector.apply("r-1", 0, FAULT)
+    status, removed, err = safe_cleanup(injector, "r-1")
+    assert status == "INCOMPLETE"
+    assert removed == []
+    assert "CleanupIncomplete" in err
+
+
+def test_incomplete_cleanup_is_recorded_and_next_recover_retries(tmp_path):
+    """정리에 실패하면 cleanup=INCOMPLETE로 남고, 다음 recover가 다시 정리해 OK가 된다."""
     store = StateStore(str(tmp_path / "state.json"))
     store.save({"run_id": "r-1", "phase": "OBSERVING", "history": []})
     api = FakeApi(finalizer_polls=10_000)
     injector, _ = make(api, timeout=3)
     injector.apply("r-1", 0, FAULT)
 
-    with pytest.raises(CleanupIncomplete):
-        recover(store, injector)
-    assert (
-        store.load()["phase"] == "OBSERVING"
-    )  # ABORTED로 덮이지 않음 → 다음 실행이 막힘
-
-    api.finalizer_polls = 0
-    api.objects[("podchaos", "r-1-s0")]["deleting"] = 0  # finalizer가 풀림
     state = recover(store, injector)
     assert state["phase"] == "ABORTED"
+    assert state["cleanup"] == "INCOMPLETE"  # 다음 run의 previous_cleanup 게이트가 막음
+
+    api.objects[("podchaos", "r-1-s0")]["deleting"] = 0  # finalizer가 풀림
+    state = recover(store, injector)
+    assert (
+        state["cleanup"] == "OK"
+    )  # 이미 사라졌으므로 이번에 지운 목록은 비어 있어도 OK
+    assert injector.leftovers() == []
     assert api.objects == {}

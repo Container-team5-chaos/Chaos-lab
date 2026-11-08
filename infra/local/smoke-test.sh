@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 로컬 환경 점검 + 장애 주입 스모크 테스트
 #
-#   1. 환경: 노드, Prometheus, Chaos Mesh
+#   1. 환경: 노드, Prometheus, Chaos Mesh, metrics-server(HPA)
 #   2. 데이터: DB 스키마·계좌, Redis 시세(형식·신선도·갱신·PUBLISH)
 #   3. Prometheus: 쿼리 가능, k6 remote write receiver 켜짐
 #   4. PodChaos: Pod 1개만 정확히 종료, 같은 이름 재생성 시 중복 0, 정리 멱등
@@ -57,6 +57,8 @@ fi
 check "Chaos Mesh controller Ready" k -n chaos-mesh wait --for=condition=Ready pod -l app.kubernetes.io/component=controller-manager --timeout=10s
 check "chaos-daemon 전체 노드 배치" k -n chaos-mesh rollout status daemonset/chaos-daemon --timeout=10s
 check "PodChaos·NetworkChaos CRD" k get crd podchaos.chaos-mesh.org networkchaos.chaos-mesh.org
+check "metrics API Available (HPA가 CPU를 읽음)" k wait --for=condition=Available apiservice/v1beta1.metrics.k8s.io --timeout=10s
+check "kubectl top nodes 응답" k top nodes
 
 # ---------------------------------------------------------------------------
 section "2. 데이터"
