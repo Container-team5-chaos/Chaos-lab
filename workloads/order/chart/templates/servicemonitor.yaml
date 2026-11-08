@@ -1,0 +1,17 @@
+{{- if .Values.serviceMonitor.enabled }}
+# release 라벨 없이도 수집됨 (infra/local 설정: serviceMonitorSelectorNilUsesHelmValues=false)
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: order
+  labels:
+    {{- include "order.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "order.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics/        # 앱이 /metrics 아래에 마운트되어 있어 끝에 / 필요
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

@@ -1,0 +1,70 @@
+# 주문 서비스 기본 설정 (회복탄력성 설정을 모두 켠 상태)
+# 개선 전 비교용 설정은 values-baseline.yaml 참고
+
+replicaCount: 2
+
+image:
+  repository: chaos-lab-order
+  tag: dev
+  pullPolicy: IfNotPresent   # kind에 직접 넣은 이미지를 쓰므로 받으러 가지 않음
+
+service:
+  port: 8000
+
+# 앱 설정 (API.md 5장)
+config:
+  staleMs: "5000"            # 이보다 오래된 시세로는 체결하지 않음
+  dbPoolSize: "10"           # Pod당 DB 커넥션 수. dbPoolSize × hpa.maxReplicas < 100
+  redisUrl: redis://redis:6379/0
+
+# DB 접속 정보는 infra/k8s/data/postgres.yaml의 Secret에서 가져옴
+database:
+  secretName: postgres
+  host: postgres
+  port: 5432
+
+resources:
+  requests:
+    cpu: 100m                # 워커 1대에서 Pod 여러 개가 뜰 수 있게 작게
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+# 롤링 업데이트: 새 Pod가 Ready가 된 뒤에 옛 Pod를 내림
+rollingUpdate:
+  maxSurge: 1
+  maxUnavailable: 0
+
+# preStop 대기 + 앱의 정상 종료(최대 20초)보다 길어야 SIGKILL을 피함
+terminationGracePeriodSeconds: 40
+
+preStop:
+  enabled: true
+  sleepSeconds: 10           # Endpoint 제거가 퍼질 시간을 벌어 줌
+
+readinessProbe:
+  enabled: true
+  periodSeconds: 5
+  failureThreshold: 2
+
+livenessProbe:
+  periodSeconds: 10
+  failureThreshold: 3
+
+# 같은 노드에 몰리지 않게 (워커 1대인 로컬에서도 뜨도록 preferred)
+antiAffinity:
+  enabled: true
+
+hpa:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 70
+
+pdb:
+  enabled: true
+  minAvailable: 1
+
+serviceMonitor:
+  enabled: true
+  interval: 5s

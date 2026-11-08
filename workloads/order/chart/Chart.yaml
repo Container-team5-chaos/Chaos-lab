@@ -1,0 +1,6 @@
+apiVersion: v2
+name: order
+description: 모의 거래소 주문 서비스 (실험 대상)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
