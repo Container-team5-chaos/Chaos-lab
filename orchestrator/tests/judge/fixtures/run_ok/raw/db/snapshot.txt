@@ -1,0 +1,87 @@
+--@ fingerprint1
+orders,max_order_id,krw_sum,positions,volume_sum
+"9","9","19957799.7593","2","0.00042345"
+--@end fingerprint1
+--@ schema
+kind,table_name,name,detail
+"table","accounts","accounts",
+"table","orders","orders",
+"table","positions","positions",
+"table","ticks","ticks",
+"column","accounts","user_id","text not null"
+"column","accounts","krw","numeric(24,4) not null"
+"column","accounts","created_at","timestamp with time zone not null"
+"column","orders","id","bigint not null"
+"column","orders","client_order_id","text not null"
+"column","orders","user_id","text not null"
+"column","orders","market","text not null"
+"column","orders","side","text not null"
+"column","orders","volume","numeric(30,8) not null"
+"column","orders","status","text not null"
+"column","orders","fill_price","numeric(24,8)"
+"column","orders","amount","numeric(24,4)"
+"column","orders","created_at","timestamp with time zone not null"
+"column","orders","filled_at","timestamp with time zone"
+"column","positions","user_id","text not null"
+"column","positions","market","text not null"
+"column","positions","volume","numeric(30,8) not null"
+"column","positions","avg_price","numeric(24,8) not null"
+"column","positions","updated_at","timestamp with time zone not null"
+"column","ticks","id","bigint not null"
+"column","ticks","market","text not null"
+"column","ticks","price","numeric(24,8) not null"
+"column","ticks","received_at","timestamp with time zone not null"
+"constraint","accounts","accounts_krw_check","CHECK ((krw >= (0)::numeric))"
+"constraint","accounts","accounts_pkey","PRIMARY KEY (user_id)"
+"constraint","orders","orders_check","CHECK (((status <> 'filled'::text) OR ((fill_price IS NOT NULL) AND (amount IS NOT NULL) AND (filled_at IS NOT NULL))))"
+"constraint","orders","orders_client_order_id_key","UNIQUE (client_order_id)"
+"constraint","orders","orders_pkey","PRIMARY KEY (id)"
+"constraint","orders","orders_side_check","CHECK ((side = ANY (ARRAY['bid'::text, 'ask'::text])))"
+"constraint","orders","orders_status_check","CHECK ((status = ANY (ARRAY['accepted'::text, 'pending'::text, 'filled'::text, 'rejected'::text])))"
+"constraint","orders","orders_user_id_fkey","FOREIGN KEY (user_id) REFERENCES accounts(user_id)"
+"constraint","orders","orders_volume_check","CHECK ((volume > (0)::numeric))"
+"constraint","positions","positions_avg_price_check","CHECK ((avg_price >= (0)::numeric))"
+"constraint","positions","positions_pkey","PRIMARY KEY (user_id, market)"
+"constraint","positions","positions_user_id_fkey","FOREIGN KEY (user_id) REFERENCES accounts(user_id)"
+"constraint","positions","positions_volume_check","CHECK ((volume >= (0)::numeric))"
+"constraint","ticks","ticks_pkey","PRIMARY KEY (id)"
+--@end schema
+--@ accounts
+user_id,krw
+"user-0001","9990050.0000"
+"user-0002","9967749.7593"
+--@end accounts
+--@ positions
+user_id,market,volume,avg_price
+"user-0001","KRW-BTC","0.00010000","100406666.66666666"
+"user-0002","KRW-BTC","0.00032345","100027481.85293632"
+--@end positions
+--@ orders
+id,client_order_id,user_id,market,side,volume,status,fill_price,amount,created_at,filled_at
+"1","k6-r-offline-ok-1-1","user-0001","KRW-BTC","bid","0.00020000","filled","100000000.00000000","20000.0000","2025-11-04 23:46:40.5061+00","2025-11-04 23:46:40.5061+00"
+"2","k6-r-offline-ok-2-1","user-0002","KRW-BTC","bid","0.00012345","filled","100123457.00000000","12360.2407","2025-11-04 23:46:41.506101+00","2025-11-04 23:46:41.506101+00"
+"3","k6-r-offline-ok-1-2","user-0001","KRW-BTC","bid","0.00010000","filled","101000000.00000000","10100.0000","2025-11-04 23:46:42.506102+00","2025-11-04 23:46:42.506102+00"
+"4","k6-r-offline-ok-2-2","user-0002","KRW-BTC","bid","0.00030000","filled","99500000.00000000","29850.0000","2025-11-04 23:46:43.506103+00","2025-11-04 23:46:43.506103+00"
+"5","k6-r-offline-ok-1-3","user-0001","KRW-BTC","ask","0.00010000","filled","100500000.00000000","10050.0000","2025-11-04 23:46:44.506104+00","2025-11-04 23:46:44.506104+00"
+"6","k6-r-offline-ok-2-3","user-0002","KRW-BTC","ask","0.00020000","filled","100200000.00000000","20040.0000","2025-11-04 23:46:45.506105+00","2025-11-04 23:46:45.506105+00"
+"7","k6-r-offline-ok-1-4","user-0001","KRW-BTC","bid","0.00005000","filled","100700000.00000000","5035.0000","2025-11-04 23:46:46.506106+00","2025-11-04 23:46:46.506106+00"
+"8","k6-r-offline-ok-1-5","user-0001","KRW-BTC","ask","0.00015000","filled","100900000.00000000","15135.0000","2025-11-04 23:46:48.506108+00","2025-11-04 23:46:48.506108+00"
+"9","k6-r-offline-ok-2-4","user-0002","KRW-BTC","bid","0.00010000","filled","100800000.00000000","10080.0000","2025-11-04 23:46:48.514107+00","2025-11-04 23:46:48.514107+00"
+--@end orders
+--@ fingerprint2
+orders,max_order_id,krw_sum,positions,volume_sum
+"9","9","19957799.7593","2","0.00042345"
+--@end fingerprint2
+--@ ticks
+market,price,received_at
+"KRW-BTC","99000000.00000000","2025-11-04 23:46:38.5+00"
+"KRW-BTC","100000000.00000000","2025-11-04 23:46:40.2561+00"
+"KRW-BTC","100123457.00000000","2025-11-04 23:46:41.256101+00"
+"KRW-BTC","101000000.00000000","2025-11-04 23:46:42.256102+00"
+"KRW-BTC","99500000.00000000","2025-11-04 23:46:43.256103+00"
+"KRW-BTC","100500000.00000000","2025-11-04 23:46:44.256104+00"
+"KRW-BTC","100200000.00000000","2025-11-04 23:46:45.256105+00"
+"KRW-BTC","100700000.00000000","2025-11-04 23:46:46.256106+00"
+"KRW-BTC","100900000.00000000","2025-11-04 23:46:48.256108+00"
+"KRW-BTC","100800000.00000000","2025-11-04 23:46:48.264107+00"
+--@end ticks
