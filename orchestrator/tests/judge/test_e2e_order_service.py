@@ -13,7 +13,7 @@
 - judge db 번들은 `docker exec -i e2e-judge-pg psql -U exchange -d exchange`(Transports.for_local_pg)로 돈다.
   evaluate는 PASS다. krw를 1원 바꾸고 다시 찍으면 FAIL(INTEGRITY_VIOLATION, cash 1건)이다.
 - `-m e2e`를 명시하고 ORDER_SERVICE_PYTHON이 실행 파일일 때만 돈다. docker를 못 쓰면 skip한다.
-  끝나면 앱 프로세스를 멈추고 두 컨테이너를 지운다. CI는 `-m "not … and not e2e"`라 돌지 않는다.
+  끝나면 앱 프로세스를 멈추고 두 컨테이너를 지운다. 기본 실행(`-m "not … and not e2e"`)에서는 돌지 않는다.
 
 준비(예): python3.11 -m venv <venv> && <venv>/bin/pip install -r workloads/order/requirements.txt
 실행: ORDER_SERVICE_PYTHON=<venv>/bin/python ../.venv/bin/pytest -q -m e2e tests/judge/test_e2e_order_service.py
