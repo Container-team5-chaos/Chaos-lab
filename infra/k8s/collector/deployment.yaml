@@ -27,7 +27,7 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      # 시세 전용 price_history 테이블만 생성함. 주문 스키마/seed는 실행하지 않음.
+      # 공용 ticks 시세 테이블 생성/확장. 주문/계좌 스키마와 seed는 실행하지 않음.
       initContainers:
         - name: init-history
           image: chaos-lab-collector:dev

@@ -15,6 +15,7 @@ import signal
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -97,7 +98,10 @@ class Tick:
         return json.dumps({"price": format(self.price, "f"), "ts": self.ts})
 
     def row(self):
-        return (self.event_id, self.market, self.price, self.ts, self.source_ts)
+        received_at = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(
+            milliseconds=self.ts
+        )
+        return (self.event_id, self.market, self.price, received_at, self.source_ts)
 
 
 def parse_tick(raw, settings, received_ms):
@@ -194,7 +198,7 @@ async def collect(settings, redis, queue):
             delay = min(delay * 2, 30.0)
 
 
-INSERT = """INSERT INTO price_history (event_id, market, price, ts, source_ts)
+INSERT = """INSERT INTO ticks (event_id, market, price, received_at, source_ts)
             VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (event_id) DO NOTHING"""
 
