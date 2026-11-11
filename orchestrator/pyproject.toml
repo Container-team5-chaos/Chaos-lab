@@ -9,7 +9,7 @@ requires-python = ">=3.11"
 dependencies = ["PyYAML>=6"]
 
 [project.optional-dependencies]
-k8s = ["kubernetes>=29"]
+k8s = ["kubernetes>=29", "redis>=5"]
 dev = ["pytest"]
 
 [project.scripts]
@@ -28,4 +28,5 @@ testpaths = ["tests"]
 markers = [
     "pg: 로컬 docker postgres가 필요한 테스트",
     "k6: 로컬 k6가 필요한 테스트",
+    "e2e: docker로 실제 주문 서비스(workloads/order)를 띄우는 테스트(CI 제외)",
 ]

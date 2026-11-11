@@ -1,0 +1,22 @@
+# 개선 전 비교용 설정 (시나리오 1, 3 베이스라인)
+# 회복탄력성 설정을 끈 상태로, 같은 실험을 돌려 개선 효과를 비교한다.
+#   helm upgrade --install order workloads/order/chart -n exchange \
+#     -f workloads/order/chart/values-baseline.yaml
+
+rollingUpdate:
+  maxSurge: 1
+  maxUnavailable: 1          # Ready 확인 없이 옛 Pod를 먼저 내릴 수 있음
+
+terminationGracePeriodSeconds: 30
+
+preStop:
+  enabled: false             # Endpoint 제거 전에 종료가 시작됨
+
+readinessProbe:
+  enabled: false             # 준비되기 전에도 트래픽을 받음
+
+antiAffinity:
+  enabled: false
+
+pdb:
+  enabled: false

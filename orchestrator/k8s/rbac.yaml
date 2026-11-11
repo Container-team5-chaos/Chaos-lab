@@ -1,0 +1,33 @@
+# 오케스트레이터가 exchange namespace에서 Chaos 리소스를 만들고 지울 수 있게 하는 권한
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: chaos-orchestrator
+  namespace: exchange
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: chaos-orchestrator
+  namespace: exchange
+rules:
+  - apiGroups: ["chaos-mesh.org"]
+    resources: ["podchaos", "networkchaos"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: chaos-orchestrator
+  namespace: exchange
+subjects:
+  - kind: ServiceAccount
+    name: chaos-orchestrator
+    namespace: exchange
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: chaos-orchestrator

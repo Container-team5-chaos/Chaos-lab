@@ -1,0 +1,10 @@
+# order-api-pod-kill: kubectl delete pod(SIGTERM 정상 종료). 종료 중 새 주문은 503 not_ready(결과 불명)이고,
+# k6가 같은 본문·같은 키로 다시 보내 OK(not_committed, 커밋 뒤 연결 오류면 after_503)가 된다. 응답 손실이 없어야 한다(설계 6)
+extends: default.yaml
+fault_effect:
+  - {id: pod_replaced, observe: pod_replaced, target: order-api, within_s: 120}
+  # 보고만 한다. 엔드포인트가 먼저 빠지면 k6가 503을 못 볼 수 있다
+  - {id: shutdown_seen_by_k6, class_sub: [not_committed, after_503], account: any, op: '>=', value: 1, required: false}
+checks:
+  - {id: unresolved_zero, kind: unresolved, class: [UNRESOLVED_COMMITTED, UNRESOLVED_ABSENT], phases: [fault, recovery], op: '==', value: 0}
+  - {id: order_recovery_k6, kind: client, stat: recovery, required: false}   # 2차에 required

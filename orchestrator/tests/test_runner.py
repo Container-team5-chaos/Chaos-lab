@@ -1,8 +1,17 @@
+import hashlib
+import json
+
 import pytest
 
 from orchestrator.cleanup import recover
+from orchestrator.gates import (
+    CompositeGate,
+    no_leftover_chaos,
+    previous_cleanup_ok,
+    price_fresh,
+)
 from orchestrator.inject import MockInjector, chaos_name
-from orchestrator.judging import MockJudge
+from orchestrator.judging import FAIL, INCONCLUSIVE, MockJudge, accept
 from orchestrator.observe import MockLoad
 from orchestrator.runner import Runner
 from orchestrator.store import StateStore
@@ -18,24 +27,44 @@ class Crash(BaseException):
     """프로세스가 죽는 상황 흉내 (try/except Exception에 안 잡힘)."""
 
 
-def make(tmp_path, injector=None, sleep=lambda s: None):
+class Clock:
+    """가짜 시계. sleep하면 시간이 흐른다."""
+
+    def __init__(self):
+        self.t = 1_000.0
+
+    def now(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+def make(tmp_path, injector=None, sleep=None, judge=None, **kw):
     store = StateStore(tmp_path / "state.json")
     inj = injector or MockInjector()
-    return (
+    clock = Clock()
+    runner = Runner(
         store,
         inj,
-        Runner(
-            store, inj, MockLoad(), MockJudge(), sleep=sleep, runs_dir=tmp_path / "runs"
-        ),
+        MockLoad(),
+        judge or MockJudge(),
+        sleep=sleep or clock.sleep,
+        now=clock.now,
+        runs_dir=tmp_path / "runs",
+        **kw,
     )
+    return store, inj, runner
 
 
-def test_normal_run_reaches_done(tmp_path):
+# ---- 기본 흐름 ----------------------------------------------------------
+def test_normal_run_passes(tmp_path):
     store, inj, runner = make(tmp_path)
     state = runner.run(SCENARIO, run_id="r-e1")
-    assert state["phase"] == "DONE"
-    assert store.load()["phase"] == "DONE"
-    assert inj.resources == {}  # 끝나면 장애 리소스 정리
+    assert state["phase"] == "DONE" and state["result"] == "PASSED"
+    assert state["cleanup"] == "OK"
+    assert store.load()["result"] == "PASSED"
+    assert inj.resources == {}
     phases = [h["phase"] for h in state["history"]]
     assert phases == [
         "PRECHECK",
@@ -48,59 +77,69 @@ def test_normal_run_reaches_done(tmp_path):
     ]
 
 
+@pytest.mark.parametrize(
+    "outcome,result", [(FAIL, "FAILED"), (INCONCLUSIVE, "INCONCLUSIVE")]
+)
+def test_judge_outcome_maps_to_result(tmp_path, outcome, result):
+    _, _, runner = make(tmp_path, judge=MockJudge(outcome))
+    assert runner.run(SCENARIO, run_id="r-j1")["result"] == result
+
+
 def test_chaos_name_is_deterministic():
     assert chaos_name("r-e1", 0) == chaos_name("r-e1", 0)
     assert chaos_name("R_e1", 0) == "r-e1-s0"
 
 
-def test_apply_twice_creates_one(tmp_path):
+def test_apply_twice_creates_one():
     inj = MockInjector()
     inj.apply("r-e1", 0, {})
     inj.apply("r-e1", 0, {})
     assert len(inj.resources) == 1
 
 
+# ---- 시나리오 5-b: 재시작 -------------------------------------------------
 def test_restart_mid_observe_aborts_without_reinjecting(tmp_path):
     """완료 기준: 실행 중 Pod 삭제 → 재시작 후 ABORTED, PodChaos 중복 0."""
     inj = MockInjector()  # 클러스터는 Pod가 죽어도 남아 있으므로 같은 인스턴스 공유
-
-    calls = []
+    store, _, runner = make(tmp_path, inj)
+    clock_sleep = runner.sleep
 
     def die_on_observe(seconds):
-        calls.append(seconds)
-        if len(calls) == 2:  # warmup 다음 sleep = OBSERVING 중
+        if runner.state.get("phase") == "OBSERVING":
             raise Crash()
+        clock_sleep(seconds)
 
-    store, _, runner = make(tmp_path, inj, sleep=die_on_observe)
-    # 프로세스 강제 종료를 흉내: Runner의 except가 돌기 전에 죽은 것처럼 _abort를 막는다
-    runner._abort = lambda reason: None
+    runner.sleep = die_on_observe
+    runner._abort = lambda reason: None  # kill -9: 정리 코드가 돌 틈이 없음
     with pytest.raises(Crash):
         runner.run(SCENARIO, run_id="r-e1")
     assert store.load()["phase"] == "OBSERVING"
     assert len(inj.resources) == 1
     creates_before = inj.create_calls
 
-    # 새 Pod 기동
-    state = recover(StateStore(tmp_path / "state.json"), inj)
-    assert state["phase"] == "ABORTED"
+    state = recover(StateStore(tmp_path / "state.json"), inj)  # 새 Pod 기동
+    assert state["phase"] == "ABORTED" and state["result"] == "ABORTED"
+    assert state["reason"] == "orchestrator_restart"
     assert state["aborted_from"] == "OBSERVING"
-    assert inj.resources == {}  # 남은 Chaos 정리
+    assert state["cleanup"] == "OK"
+    assert inj.resources == {}
     assert inj.create_calls == creates_before  # 복구 중 새 주입 없음
 
 
 def test_exception_in_process_aborts_and_cleans(tmp_path):
-    calls = []
+    store, inj, runner = make(tmp_path)
+    clock_sleep = runner.sleep
 
     def boom(seconds):
-        calls.append(seconds)
-        if len(calls) == 2:
+        if runner.state.get("phase") == "OBSERVING":
             raise RuntimeError("k6 died")
+        clock_sleep(seconds)
 
-    store, inj, runner = make(tmp_path, sleep=boom)
+    runner.sleep = boom
     with pytest.raises(RuntimeError):
         runner.run(SCENARIO, run_id="r-e2")
     s = store.load()
-    assert s["phase"] == "ABORTED" and s["aborted_from"] == "OBSERVING"
+    assert s["result"] == "ABORTED" and s["aborted_from"] == "OBSERVING"
     assert inj.resources == {}
 
 
@@ -111,25 +150,135 @@ def test_recover_is_noop_after_done(tmp_path):
 
 
 def test_next_run_cleans_previous_interrupted(tmp_path):
-    store = StateStore(tmp_path / "state.json")
+    store, inj, runner = make(tmp_path)
     store.save({"run_id": "r-old", "phase": "INJECTING", "history": []})
-    inj = MockInjector()
     inj.apply("r-old", 0, {})
-    runner = Runner(
-        store,
-        inj,
-        MockLoad(),
-        MockJudge(),
-        sleep=lambda s: None,
-        runs_dir=tmp_path / "runs",
-    )
     runner.run(SCENARIO, run_id="r-new")
     assert "r-old-s0" not in inj.resources
 
 
-def test_run_json_contract(tmp_path):
-    import json
+# ---- 시나리오 5-a: 관측 소실 ---------------------------------------------
+class FlakyWatch:
+    """n번째 확인부터 계속 실패."""
 
+    def __init__(self, fail_from):
+        self.n, self.fail_from = 0, fail_from
+
+    def healthy(self):
+        self.n += 1
+        return self.n < self.fail_from
+
+
+def test_observability_lost_is_inconclusive_and_cleans(tmp_path):
+    scenario = {**SCENARIO, "durations": {"warmup": 5, "observe": 120, "recover": 5}}
+    _, inj, runner = make(tmp_path, watch=FlakyWatch(fail_from=4))
+    state = runner.run(scenario, run_id="r-w1")
+    assert state["result"] == "INCONCLUSIVE"
+    assert state["reason"].startswith("observability_lost")
+    assert state["interrupted_at"] == "OBSERVING"
+    assert state["cleanup"] == "OK" and inj.resources == {}
+    assert "verdict" not in state  # 판정하지 않는다
+    assert [h["phase"] for h in state["history"]][-1] == "DONE"
+
+
+def test_short_blip_is_tolerated(tmp_path):
+    class Blip:
+        def __init__(self):
+            self.n = 0
+
+        def healthy(self):
+            self.n += 1
+            return self.n != 3  # 한 번만 실패 (5초) < 15초
+
+    scenario = {**SCENARIO, "durations": {"warmup": 5, "observe": 60, "recover": 5}}
+    _, _, runner = make(tmp_path, watch=Blip())
+    assert runner.run(scenario, run_id="r-w2")["result"] == "PASSED"
+
+
+def test_lost_detected_within_15s(tmp_path):
+    clock_log = []
+
+    class Dead:
+        def healthy(self):
+            return False
+
+    scenario = {**SCENARIO, "durations": {"warmup": 0, "observe": 300, "recover": 0}}
+    _, _, runner = make(tmp_path, watch=Dead())
+    start = runner.now()
+    state = runner.run(scenario, run_id="r-w3")
+    clock_log.append(state["ended_at"] - start)
+    assert state["result"] == "INCONCLUSIVE"
+    assert clock_log[0] <= 15
+
+
+# ---- 정리 실패 → 다음 run 차단 --------------------------------------------
+class BrokenCleanup(MockInjector):
+    def cleanup(self, run_id):
+        raise RuntimeError("api down")
+
+
+def test_cleanup_failure_is_inconclusive_and_blocks_next_run(tmp_path):
+    inj = BrokenCleanup()
+    store, _, runner = make(tmp_path, inj)
+    state = runner.run(SCENARIO, run_id="r-c1")
+    assert state["cleanup"] == "INCOMPLETE"
+    assert state["result"] == "INCONCLUSIVE"  # 장애가 남았을 수 있으면 PASS 아님
+
+    runner.gate = CompositeGate(
+        {
+            "previous_cleanup": previous_cleanup_ok(store),
+            "no_leftover_chaos": no_leftover_chaos(inj),
+        }
+    )
+    # recover가 다시 정리를 시도하지만 여전히 실패 → 게이트가 막는다
+    blocked = runner.run(SCENARIO, run_id="r-c2")
+    assert blocked["phase"] == "GATE_FAILED"
+    assert "previous_cleanup" in blocked["reason"]
+    assert inj.create_calls == 1  # 두 번째 run은 주입하지 않았다
+    assert store.load()["run_id"] == "r-c1"  # 이전 기록을 덮어쓰지 않는다
+
+
+def test_recover_retries_incomplete_cleanup(tmp_path):
+    store = StateStore(tmp_path / "state.json")
+    inj = MockInjector()
+    inj.apply("r-old", 0, {})
+    store.save({"run_id": "r-old", "phase": "DONE", "cleanup": "INCOMPLETE"})
+    state = recover(store, inj)
+    assert state["cleanup"] == "OK" and inj.resources == {}
+    assert state["phase"] == "DONE"  # 결과는 그대로 두고 정리만 다시 한다
+
+
+# ---- 시작 게이트 ----------------------------------------------------------
+def test_gate_blocks_on_leftover_chaos(tmp_path):
+    inj = MockInjector()
+    inj.apply("r-zombie", 0, {})
+    _, _, runner = make(tmp_path, inj)
+    runner.gate = CompositeGate({"no_leftover_chaos": no_leftover_chaos(inj)})
+    state = runner.run(SCENARIO, run_id="r-g1")
+    assert state["phase"] == "GATE_FAILED"
+    assert inj.create_calls == 1
+
+
+def test_price_fresh_check():
+    def now():
+        return 1_000.0
+
+    fresh = price_fresh(lambda m: json.dumps({"price": "1", "ts": 999_000}), now=now)
+    stale = price_fresh(lambda m: json.dumps({"price": "1", "ts": 990_000}), now=now)
+    missing = price_fresh(lambda m: None, now=now)
+    assert fresh({})[0] and not stale({})[0] and not missing({})[0]
+
+
+def test_gate_error_closes(tmp_path):
+    def boom(scenario):
+        raise ConnectionError("redis down")
+
+    result = CompositeGate({"price_fresh": boom}).check({})
+    assert not result.ok and "redis down" in result.reason
+
+
+# ---- run.json 계약 --------------------------------------------------------
+def test_run_json_contract(tmp_path):
     _, _, runner = make(tmp_path)
     runner.run(SCENARIO, run_id="r-c1")
     run = json.loads((tmp_path / "runs" / "r-c1" / "run.json").read_text())
@@ -145,27 +294,74 @@ def test_bad_run_id_rejected(tmp_path):
         runner.run(SCENARIO, run_id="Bad_ID")
 
 
-def test_accept_requires_all_four(tmp_path):
-    import hashlib
-    import json
+# ---- B 판정 수용 ----------------------------------------------------------
+def _sha(p):
+    return hashlib.sha256(p.read_bytes()).hexdigest()
 
-    from orchestrator.judging import accept
 
+@pytest.fixture
+def run_dir(tmp_path):
     d = tmp_path / "runs" / "r-a1"
     d.mkdir(parents=True)
     (d / "crit.yaml").write_text("x: 1")
     rj = d / "run.json"
     rj.write_text(json.dumps({"run_id": "r-a1", "criteria": "crit.yaml"}))
-
-    def sha(p):
-        return hashlib.sha256(p.read_bytes()).hexdigest()
-
-    ok = {
-        "verdict": "PASS",
-        "run_id": "r-a1",
-        "inputs": {"run_json_sha256": sha(rj), "criteria_sha256": sha(d / "crit.yaml")},
+    good_inputs = {
+        "run_json_sha256": _sha(rj),
+        "criteria_sha256": _sha(d / "crit.yaml"),
     }
-    assert accept(0, ok, rj, "r-a1").passed
-    assert not accept(10, ok, rj, "r-a1").passed
-    assert not accept(0, {**ok, "run_id": "r-other"}, rj, "r-a1").passed
-    assert not accept(0, {**ok, "inputs": {}}, rj, "r-a1").passed
+    return rj, good_inputs
+
+
+def test_accept_pass_needs_all_four(run_dir):
+    rj, inputs = run_dir
+    ok = {"verdict": "PASS", "run_id": "r-a1", "inputs": inputs}
+    assert accept(0, ok, rj, "r-a1").outcome == "PASS"
+    assert accept(0, {**ok, "run_id": "r-x"}, rj, "r-a1").outcome == "INCONCLUSIVE"
+    assert accept(0, {**ok, "inputs": {}}, rj, "r-a1").outcome == "INCONCLUSIVE"
+
+
+def test_accept_fail_and_inconclusive(run_dir):
+    rj, inputs = run_dir
+    fail = {"verdict": "FAIL", "run_id": "r-a1", "inputs": inputs}
+    assert accept(10, fail, rj, "r-a1").outcome == "FAIL"
+    # 다른 run의 FAIL은 믿지 않는다
+    assert accept(10, {**fail, "run_id": "r-x"}, rj, "r-a1").outcome == "INCONCLUSIVE"
+    inc = {"verdict": "INCONCLUSIVE", "run_id": "r-a1", "inputs": inputs}
+    assert accept(11, inc, rj, "r-a1").outcome == "INCONCLUSIVE"
+
+
+def test_job_restart_with_same_run_id_does_not_start_new_run(tmp_path):
+    """5-b: Job이 같은 RUN_ID로 대체 Pod를 띄우면 정리만 하고 끝난다."""
+    inj = MockInjector()
+    store, _, runner = make(tmp_path, inj)
+    clock_sleep = runner.sleep
+
+    def die(seconds):
+        if runner.state.get("phase") == "OBSERVING":
+            raise Crash()
+        clock_sleep(seconds)
+
+    runner.sleep = die
+    runner._abort = lambda reason: None
+    with pytest.raises(Crash):
+        runner.run(SCENARIO, run_id="r-job1")
+
+    _, _, runner2 = make(tmp_path, inj)  # 대체 Pod
+    state = runner2.run(SCENARIO, run_id="r-job1")
+    assert state["result"] == "ABORTED" and state["reason"] == "orchestrator_restart"
+    assert inj.create_calls == 1 and inj.resources == {}
+    # 한 번 더 재시작돼도 그대로
+    assert runner2.run(SCENARIO, run_id="r-job1")["result"] == "ABORTED"
+    assert inj.create_calls == 1
+
+
+def test_criteria_path_is_absolute_from_scenario(tmp_path):
+    scen_dir = tmp_path / "experiments" / "scenarios"
+    scen_dir.mkdir(parents=True)
+    _, _, runner = make(tmp_path)
+    runner.run(SCENARIO, run_id="r-p1", scenario_path=str(scen_dir / "pod-kill.yaml"))
+    run = json.loads((tmp_path / "runs" / "r-p1" / "run.json").read_text())
+    assert run["criteria"] == str(
+        tmp_path / "experiments" / "criteria" / "default.yaml"
+    )

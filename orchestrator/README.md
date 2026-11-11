@@ -20,6 +20,36 @@ PRECHECK → WARMUP → INJECTING → OBSERVING → RECOVERING → JUDGING → D
 | RECOVERING | 장애 리소스 제거, k6 정지 | E: `Injector.cleanup(run_id)`, B: `LoadGenerator.stop(run_id)` |
 | JUDGING | 판정 | B: `python -m orchestrator.judge run --run runs/<run_id>/run.json` → 수용 조건 4개 확인 |
 
+## 최종 결과 (`result`)
+
+| result | 언제 | 종료 코드 |
+|---|---|---|
+| PASSED | B 판정 PASS + 수용 조건 4개 + `cleanup=OK` | 0 |
+| FAILED | B 판정 FAIL (같은 run의 판정일 때만) | 10 |
+| INCONCLUSIVE | B 판정 INCONCLUSIVE, 판정 신뢰 불가, 관측 소실(5-a), 정리 실패 | 11 |
+| ABORTED | 오케스트레이터 예외·SIGTERM·재시작(5-b) | 1 |
+
+판단할 수 없으면 PASSED를 내지 않는다(fail-closed). `cleanup`은 `OK`/`INCOMPLETE`.
+
+## 시나리오 5: 실험 도구 장애
+
+- **5-a 관측 소실**: WARMUP·OBSERVING·RECOVERING 동안 5초마다 Prometheus `/-/ready` 확인.
+  정상 응답이 15초 넘게 없으면 장애·부하를 멈추고 판정 없이 `INCONCLUSIVE (observability_lost)`.
+- **5-b 오케스트레이터 재시작**: Job이 같은 `RUN_ID`로 대체 Pod를 띄우면, state.json을 보고
+  주입 없이 정리한 뒤 `ABORTED (orchestrator_restart)`로 끝난다. 새 실험은 시작하지 않는다.
+
+## 시작 게이트
+
+하나라도 실패하면 시작하지 않고(`GATE_FAILED`) 이전 run 기록도 덮어쓰지 않는다. 확인 중 오류도 실패로 본다.
+
+| 검사 | 내용 |
+|---|---|
+| previous_cleanup | 직전 run이 `cleanup=INCOMPLETE`면 차단 (기동 시 정리를 한 번 더 시도한 뒤 확인) |
+| no_leftover_chaos | `chaos/run-id` 라벨이 붙은 Chaos 리소스가 남아 있으면 차단 |
+| order_ready | 주문 서비스 `/readyz` 200 |
+| price_fresh | Redis `price:<market>`의 `ts`가 5초 이내 |
+| prometheus | Prometheus `/-/ready` 200 |
+
 ## B·E 브랜치와 맞춘 것
 
 - **run_id**: B 규칙 `^[a-z0-9-]{3,40}$`, 기본 `r-xxxxxxxx`.
@@ -41,7 +71,10 @@ PRECHECK → WARMUP → INJECTING → OBSERVING → RECOVERING → JUDGING → D
   "run_id": "r-1a2b3c4d",
   "scenario_name": "pod-kill",
   "phase": "ABORTED",
+  "result": "ABORTED",
+  "reason": "orchestrator_restart",
   "aborted_from": "OBSERVING",
+  "cleanup": "OK",
   "chaos_resources": ["r-1a2b3c4d-s0"],
   "cleaned_resources": ["r-1a2b3c4d-s0"],
   "history": [{"phase": "PRECHECK", "at": 1730870000.1}]
@@ -59,8 +92,23 @@ python -m orchestrator.main run ../experiments/scenarios/pod-kill.yaml
 python -m orchestrator.main recover                  # 정리만
 ```
 
-## 미정 (회의에서 합의)
+## 클러스터에서 실행 (E 로컬 환경 기준)
 
-- 오케스트레이터를 Deployment로 띄울지 Job으로 띄울지
-- 시작 게이트가 확인할 항목 (Pod Ready, 수집기 정상 등)
+```bash
+# 레포 루트에서
+docker build -f orchestrator/Dockerfile -t chaos-orchestrator:dev .
+kind load docker-image chaos-orchestrator:dev --name chaos-lab
+kubectl --context kind-chaos-lab apply -f orchestrator/k8s/rbac.yaml -f orchestrator/k8s/pvc.yaml
+RUN_ID=r-$(date +%m%d%H%M)
+sed "s/__RUN_ID__/$RUN_ID/" orchestrator/k8s/job.yaml | kubectl --context kind-chaos-lab apply -f -
+kubectl --context kind-chaos-lab -n exchange logs -f job/chaos-run-$RUN_ID
+```
+
+5-b 확인: OBSERVING 중에 Pod를 지우고 대체 Pod 로그에 `result=ABORTED  cleanup=OK`가 나오는지,
+`kubectl -n exchange get podchaos`가 비어 있는지 본다.
+
+## 미정
+
+- k6 Job 출발을 `LoadGenerator.start`에 연결 (B `judge plan` 방식과 합의)
+- 시나리오 1의 상태 인지형 주입 (HPA desired > Ready 일 때 주입)
 - 시나리오 YAML 형식 (`experiments/scenarios/pod-kill.yaml`이 초안)
