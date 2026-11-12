@@ -34,10 +34,15 @@ DB는 `postgres.exchange.svc.cluster.local:5432`, Redis는 `redis.exchange.svc.c
 연결 문자열은 psycopg로 구성하므로 Secret 비밀번호의 공백이나 특수문자를 직접 URL에 삽입하지 않는다.
 별도 Redis/PostgreSQL 또는 복제한 접속 Secret은 만들지 않는다.
 
-init container는 `python main.py init-db`로 `price_history`와 인덱스만 생성한다.
-`CREATE IF NOT EXISTS`이므로 재시작 시 기존 시세를 유지한다. 스키마 변경을 자동 마이그레이션하지는 않는다.
-주문 서비스의 `db/schema.sql`에 있는 `ticks`는 기존 선언을 유지하며 이 수집기는 사용하지 않는다.
-`price_history(event_id, market, price, ts, source_ts)`는 원본 수집기의 UUID 기반 배치 재시도 계약을 유지한다.
+init container는 `python main.py init-db`로 공용 `ticks` 시세 테이블과 인덱스를 준비한다.
+기존 `ticks`에는 `source_ts BIGINT`, `event_id UUID`와 UUID 유일 인덱스를 추가하고,
+`price`를 자릿수 제한 없는 `NUMERIC`으로 확장한다. 기존 행의 두 추가 필드는 NULL로 유지한다.
+종목은 길이 제한 없는 `TEXT`, 수신 시각은 기존 계약의 `received_at TIMESTAMPTZ`를 사용한다.
+수집기 내부/Redis의 `ts`(Unix 밀리초)는 DB 저장 시 UTC datetime으로 정확히 변환한다.
+`source_ts`는 업비트 원본 Unix 밀리초를 64비트 정수로 저장한다.
+`event_id`는 동일 배치 재시도 시 그대로 사용하며 `ON CONFLICT`로 중복 저장을 막는다.
+주문/계좌 스키마와 seed는 실행하지 않는다. 기존 `price_history` 이력은 이동하거나 삭제하지 않는다.
+기존 DB에는 갱신된 이미지의 init container 또는 명시적인 `python main.py init-db`로 적용한다.
 
 Pod는 `app: collector`, 단일 replica, `Recreate` 전략을 사용한다. 업데이트 동안 수집이 잠시 중단된다.
 카오스 주입 대상으로 사용할 때 namespace는 `exchange`, label selector는 `app: collector`를 지정한다.
@@ -58,7 +63,7 @@ kubectl --context kind-chaos-lab -n exchange rollout restart deployment/collecto
 kubectl --context kind-chaos-lab -n exchange exec deployment/redis -- redis-cli GET price:KRW-BTC
 kubectl --context kind-chaos-lab -n exchange exec deployment/redis -- redis-cli SUBSCRIBE price:KRW-BTC
 kubectl --context kind-chaos-lab -n exchange exec statefulset/postgres -- \
-  psql -U exchange -d exchange -c 'SELECT market, price, ts, source_ts FROM price_history ORDER BY ts DESC LIMIT 5;'
+  psql -U exchange -d exchange -c 'SELECT market, price, received_at, source_ts FROM ticks ORDER BY received_at DESC LIMIT 5;'
 ```
 
 GET을 몇 초 간격으로 반복해 `ts`가 증가하는지 확인한다. 주문 서비스가 실행 중이면 기존 `/orders` 요청을 보내 같은 Redis 현재가로 체결되는지 확인할 수 있다.

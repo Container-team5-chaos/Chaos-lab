@@ -5,6 +5,7 @@ import json
 import sys
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -35,6 +36,18 @@ class CollectorTests(unittest.IsolatedAsyncioTestCase):
             json.loads(tick.payload()), {"price": "100000000.12345678", "ts": self.now}
         )
         self.assertEqual(str(tick.row()[2]), "100000000.12345678")
+
+    def test_database_row_keeps_receive_and_source_times_distinct(self):
+        message = dict(self.message, timestamp=10000)
+        tick = main.parse_tick(json.dumps(message), self.settings, 10123)
+        row = tick.row()
+        self.assertEqual(row[0], tick.event_id)
+        self.assertEqual(row[1], "KRW-BTC")
+        self.assertEqual(
+            row[3], datetime(1970, 1, 1, 0, 0, 10, 123000, tzinfo=timezone.utc)
+        )
+        self.assertEqual(row[4], 10000)
+        self.assertEqual(json.loads(tick.payload())["ts"], 10123)
 
     def test_reject_invalid_and_stale_ticks(self):
         for field, value in [

@@ -39,7 +39,9 @@ CREATE INDEX orders_user_created ON orders (user_id, created_at);
 CREATE TABLE ticks (
     id           BIGSERIAL     PRIMARY KEY,
     market       TEXT          NOT NULL,
-    price        NUMERIC(24,8) NOT NULL,
-    received_at  TIMESTAMPTZ   NOT NULL
+    price        NUMERIC       NOT NULL,
+    received_at  TIMESTAMPTZ   NOT NULL,
+    source_ts    BIGINT,                    -- 업비트 원본 시각 (Unix 밀리초)
+    event_id     UUID          UNIQUE      -- 수집기 배치 재시도 중복 방지
 );
 CREATE INDEX ticks_market_time ON ticks (market, received_at);
