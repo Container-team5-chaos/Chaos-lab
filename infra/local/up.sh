@@ -6,8 +6,10 @@
 # 사용법:
 #   infra/local/up.sh               # 인프라만 (시세는 stub)
 #   infra/local/up.sh --with-apps   # 인프라 + 앱 (시세는 실제 수집기)
+#   LITE=1 infra/local/up.sh --with-apps   # 자원이 부족할 때: Prometheus·Grafana·Chaos Mesh 없이 앱만 확인
 # 환경 변수:
 #   CLUSTER_NAME  기본 chaos-lab
+#   LITE          1이면 Prometheus·Grafana·Chaos Mesh·metrics-server를 설치하지 않음 (장애 주입·지표 수집 불가)
 #   PRICE_STUB    1이면 시세 stub 배포, 0이면 제거. 기본: 인프라만 1, --with-apps 0
 #   ORDER_MODE    baseline 이면 주문 서비스를 개선 전 설정으로 배포 (--with-apps 일 때)
 set -euo pipefail
@@ -30,7 +32,7 @@ for arg in "$@"; do
   case "$arg" in
     --with-apps) WITH_APPS=1 ;;
     -h | --help)
-      sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) die "알 수 없는 옵션: $arg (--with-apps, --help)" ;;
@@ -45,6 +47,7 @@ else
   PRICE_STUB="${PRICE_STUB:-1}"
 fi
 ORDER_MODE="${ORDER_MODE:-}"
+LITE="${LITE:-0}"
 
 # kubectl/helm 이 다른 클러스터를 건드리지 않도록 context 명시
 k() { kubectl --context "$CONTEXT" "$@"; }
@@ -97,6 +100,19 @@ install_monitoring() {
     --wait --timeout 10m
 }
 
+# LITE 모드: Prometheus 없이 ServiceMonitor CRD만 등록 (Pod 없음)
+# 주문 서비스 차트(D)가 ServiceMonitor를 만들기 때문에 CRD가 없으면 설치가 실패함
+# 같은 버전 차트의 CRD를 쓰므로 나중에 LITE 없이 다시 실행해도 충돌하지 않음
+install_servicemonitor_crd() {
+  log "LITE=1 — Prometheus·Grafana·Chaos Mesh·metrics-server 생략, ServiceMonitor CRD만 등록"
+  local tmp
+  tmp="$(mktemp -d)"
+  helm pull prometheus-community/kube-prometheus-stack --version "$KPS_CHART_VERSION" --untar --untardir "$tmp"
+  k apply --server-side -f "$tmp/kube-prometheus-stack/charts/crds/crds/crd-servicemonitors.yaml"
+  rm -rf "$tmp"
+  k wait --for=condition=Established crd/servicemonitors.monitoring.coreos.com --timeout=60s
+}
+
 install_chaos_mesh() {
   log "Chaos Mesh $CHAOS_MESH_CHART_VERSION 설치 (namespace: chaos-mesh)"
   h upgrade --install chaos-mesh chaos-mesh/chaos-mesh \
@@ -134,12 +150,17 @@ install_price_stub() {
 verify() {
   log "설치 확인"
   local failed=0
-  # 컨트롤러와 데이터 저장소가 Ready인지 확인
+  k -n exchange exec statefulset/postgres -- pg_isready -U exchange -d exchange >/dev/null || failed=1
+  [ "$(k -n exchange exec deploy/redis -- redis-cli ping)" = "PONG" ] || failed=1
+  if [ "$LITE" = "1" ]; then
+    k get crd servicemonitors.monitoring.coreos.com >/dev/null || failed=1
+    [ "$failed" -eq 0 ] || die "일부 구성 요소가 준비되지 않았습니다. 위 로그를 확인하세요"
+    return
+  fi
+  # 컨트롤러가 Ready인지 확인
   k -n monitoring wait --for=condition=Ready pod -l app.kubernetes.io/name=prometheus --timeout=120s || failed=1
   k -n chaos-mesh wait --for=condition=Ready pod -l app.kubernetes.io/component=controller-manager --timeout=120s || failed=1
   k -n chaos-mesh rollout status daemonset/chaos-daemon --timeout=120s || failed=1
-  k -n exchange exec statefulset/postgres -- pg_isready -U exchange -d exchange >/dev/null || failed=1
-  [ "$(k -n exchange exec deploy/redis -- redis-cli ping)" = "PONG" ] || failed=1
   # Chaos Mesh CRD가 등록됐는지 확인(주입기가 PodChaos를 만들 수 있어야 함)
   k get crd podchaos.chaos-mesh.org networkchaos.chaos-mesh.org >/dev/null || failed=1
   # HPA용 리소스 지표 API가 응답하는지 (metrics-server 기동 후 첫 수집까지 수십 초 걸림)
@@ -215,7 +236,17 @@ verify_apps() {
 }
 
 summary() {
-  cat <<EOF
+  if [ "$LITE" = "1" ]; then
+    cat <<EOF
+
+로컬 환경 준비 완료 — LITE 모드  (context: $CONTEXT)
+  Prometheus·Grafana·Chaos Mesh 없음 → 장애 주입·지표 수집은 LITE 없이 다시 실행
+
+  내 PC에서 열기 (각각 다른 터미널에서)
+    kubectl --context $CONTEXT -n exchange port-forward svc/postgres 5432
+EOF
+  else
+    cat <<EOF
 
 로컬 환경 준비 완료  (context: $CONTEXT)
 
@@ -231,6 +262,7 @@ summary() {
     kubectl --context $CONTEXT -n chaos-mesh port-forward svc/chaos-dashboard 2333
     kubectl --context $CONTEXT -n exchange port-forward svc/postgres 5432
 EOF
+  fi
   if [ "$WITH_APPS" = "1" ]; then
     cat <<EOF
     kubectl --context $CONTEXT -n exchange port-forward svc/order 8000           # 주문 API
@@ -249,9 +281,13 @@ EOF
 check_deps
 create_cluster
 add_repos
-install_metrics_server
-install_monitoring
-install_chaos_mesh
+if [ "$LITE" = "1" ]; then
+  install_servicemonitor_crd
+else
+  install_metrics_server
+  install_monitoring
+  install_chaos_mesh
+fi
 install_data
 install_price_stub
 if [ "$WITH_APPS" = "1" ]; then

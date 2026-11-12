@@ -43,10 +43,27 @@ infra/local/down.sh            # 삭제
 | --- | --- | --- |
 | `PRICE_STUB` | 인프라만 `1`, `--with-apps` `0` | `1`이면 시세 stub도 띄움. 수집기 시세가 들어오면 stub은 스스로 멈춤 |
 | `ORDER_MODE` | 없음 | `baseline`이면 주문 서비스를 개선 전 설정으로 배포 |
+| `LITE` | `0` | `1`이면 Prometheus·Grafana·Chaos Mesh·metrics-server를 설치하지 않음. 앱 동작만 확인할 때 |
 
 - 수집기는 업비트에 접속해야 한다. 인터넷이 막힌 곳에서는 `PRICE_STUB=1 infra/local/up.sh --with-apps`로 실행한다.
 - B의 판정기는 `ticks` 테이블로 체결가의 신선함을 확인한다. stub만 쓰면 `ticks`가 비어 이 항목이 판정 불가(NOT_EVALUATED)가 된다. 판정까지 확인하려면 `--with-apps`로 실제 수집기를 띄운다.
 - 이미지 3개를 빌드하므로 처음 실행은 몇 분 더 걸린다. 앱 코드를 바꾼 뒤 다시 실행하면 새 이미지로 재시작한다.
+
+### 자원이 부족할 때 (LITE)
+
+```bash
+LITE=1 infra/local/up.sh --with-apps      # 앱만 띄우기
+LITE=1 infra/local/check-apps.sh          # 띄우고 확인까지
+```
+
+- 가장 무거운 Prometheus·Grafana(약 2GB)와 Chaos Mesh를 설치하지 않는다. 주문 서비스 차트가 쓰는 ServiceMonitor CRD만 등록한다(Pod 없음).
+- 장애 주입, 지표 수집, HPA 자동 확장은 되지 않는다. 화면·주문·수집기 동작 확인용이다.
+- 나중에 `LITE` 없이 다시 실행하면 빠진 구성 요소가 추가 설치된다.
+
+### 앱 검증 (`check-apps.sh`)
+
+`up.sh --with-apps`를 실행하고 Pod, 시세·`ticks`, 화면(nginx)·`/api`·`/ws`, 주문·재전송, 시세 끊김 시 `stale_price`, smoke-test를 차례로 확인한다.
+결과는 `~/chaos-test/<시각>/result.txt`. 이미 띄운 클러스터에서 확인만 할 때는 `SKIP_UP=1`.
 
 - `up.sh`: 끝에 접속 주소와 port-forward 명령 출력
 - 모든 kubectl/helm 호출은 `kind-chaos-lab` context를 명시하므로 다른 클러스터를 건드리지 않음
