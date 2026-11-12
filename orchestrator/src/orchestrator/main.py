@@ -24,6 +24,7 @@ from .gates import (
 )
 from .inject import MockInjector
 from .judging import ChaosJudge, MockJudge
+from .k6load import K6JobLoad
 from .observe import MockLoad
 from .report import summary
 from .runner import Runner
@@ -36,8 +37,7 @@ def _build(mock: bool, namespace: str):
         return MockInjector(), MockLoad(), MockJudge()
     from .inject import ChaosMeshInjector
 
-    # TODO(B): k6 Job 적용(judge plan → kubectl apply) 연결 전까지 부하는 mock
-    return ChaosMeshInjector(namespace), MockLoad(), ChaosJudge()
+    return ChaosMeshInjector(namespace), K6JobLoad(namespace), ChaosJudge()
 
 
 def main(argv=None) -> int:
