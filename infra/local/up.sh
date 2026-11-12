@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # 로컬 실험 환경을 한 번에 띄움: kind + Prometheus/Grafana + Chaos Mesh + PostgreSQL + Redis
+# --with-apps 를 주면 수집기(C)·주문 서비스(D)·데모 화면(E)까지 빌드해서 배포
 # 여러 번 실행해도 같은 결과가 되도록 작성 (이미 있는 것은 건너뛰거나 upgrade)
 #
-# 사용법: infra/local/up.sh
-# 환경 변수: CLUSTER_NAME (기본 chaos-lab)
+# 사용법:
+#   infra/local/up.sh               # 인프라만 (시세는 stub)
+#   infra/local/up.sh --with-apps   # 인프라 + 앱 (시세는 실제 수집기)
+# 환경 변수:
+#   CLUSTER_NAME  기본 chaos-lab
+#   PRICE_STUB    1이면 시세 stub 배포, 0이면 제거. 기본: 인프라만 1, --with-apps 0
+#   ORDER_MODE    baseline 이면 주문 서비스를 개선 전 설정으로 배포 (--with-apps 일 때)
 set -euo pipefail
 
 CLUSTER_NAME="${CLUSTER_NAME:-chaos-lab}"
@@ -15,11 +21,30 @@ KPS_CHART_VERSION="92.21.1"
 CHAOS_MESH_CHART_VERSION="2.8.7"
 METRICS_SERVER_CHART_VERSION="3.14.0"
 
-# 업비트 수집기(C)가 나오기 전까지 시세 stub 사용. 수집기 배포 후에는 PRICE_STUB=0 으로 실행
-PRICE_STUB="${PRICE_STUB:-1}"
-
 log() { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
+warn() { printf '\033[1;33mwarn:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+WITH_APPS="${WITH_APPS:-0}"
+for arg in "$@"; do
+  case "$arg" in
+    --with-apps) WITH_APPS=1 ;;
+    -h | --help)
+      sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *) die "알 수 없는 옵션: $arg (--with-apps, --help)" ;;
+  esac
+done
+
+# 앱을 띄우면 실제 수집기가 시세를 쓰므로 stub은 기본으로 끔
+# (수집기가 업비트에 못 붙는 환경이면 PRICE_STUB=1 로 함께 띄움 → 수집기 시세가 오면 stub이 스스로 멈춤)
+if [ "$WITH_APPS" = "1" ]; then
+  PRICE_STUB="${PRICE_STUB:-0}"
+else
+  PRICE_STUB="${PRICE_STUB:-1}"
+fi
+ORDER_MODE="${ORDER_MODE:-}"
 
 # kubectl/helm 이 다른 클러스터를 건드리지 않도록 context 명시
 k() { kubectl --context "$CONTEXT" "$@"; }
@@ -122,6 +147,73 @@ verify() {
   [ "$failed" -eq 0 ] || die "일부 구성 요소가 준비되지 않았습니다. 위 로그를 확인하세요"
 }
 
+# 수집기(C): 이미지 빌드 → kind 노드에 로드 → 배포 (절차는 workloads/collector/README.md와 같음)
+deploy_collector() {
+  log "수집기 이미지 빌드: chaos-lab-collector:dev"
+  docker build -t chaos-lab-collector:dev "$ROOT/workloads/collector"
+  kind load docker-image chaos-lab-collector:dev --name "$CLUSTER_NAME"
+  log "수집기 배포 (namespace: exchange)"
+  k apply -f "$ROOT/infra/k8s/collector/"
+  # 같은 dev 태그로 다시 빌드했어도 새 이미지를 쓰도록 재시작
+  k -n exchange rollout restart deployment/collector
+  k -n exchange rollout status deployment/collector --timeout=180s
+}
+
+# 주문 서비스(D): D의 배포 스크립트를 그대로 사용
+deploy_order() {
+  log "주문 서비스 배포 (workloads/order/deploy-local.sh${ORDER_MODE:+ $ORDER_MODE})"
+  local args=()
+  [ "$ORDER_MODE" = "baseline" ] && args=(baseline)
+  CLUSTER_NAME="$CLUSTER_NAME" bash "$ROOT/workloads/order/deploy-local.sh" "${args[@]+"${args[@]}"}"
+}
+
+# 데모 화면(E): web/이 아직 없는 브랜치에서는 건너뜀
+deploy_web() {
+  if [ -f "$ROOT/web/deploy-local.sh" ]; then
+    log "데모 화면 배포 (web/deploy-local.sh)"
+    CLUSTER_NAME="$CLUSTER_NAME" bash "$ROOT/web/deploy-local.sh"
+  else
+    log "web/deploy-local.sh 없음 — 데모 화면 배포 건너뜀"
+  fi
+}
+
+# Redis 시세가 5초 이내로 갱신되는지 (주문 서비스 STALE_MS와 같은 기준)
+price_age_ms() {
+  local now_s now_us cur ts
+  read -r now_s now_us <<<"$(k -n exchange exec deploy/redis -- redis-cli TIME | tr -d '\r' | tr '\n' ' ')"
+  cur="$(k -n exchange exec deploy/redis -- redis-cli GET price:KRW-BTC | tr -d '\r')"
+  ts="$(printf '%s' "$cur" | sed -nE 's/.*"ts": *([0-9]+).*/\1/p')"
+  [ -n "${now_s:-}" ] && [ -n "${now_us:-}" ] && [ -n "$ts" ] || return 1
+  echo $(( now_s * 1000 + now_us / 1000 - ts ))
+}
+
+verify_apps() {
+  log "앱 확인"
+  local age=""
+  for _ in $(seq 1 30); do
+    age="$(price_age_ms)" && [ "$age" -lt 5000 ] && break
+    age=""
+    sleep 2
+  done
+  if [ -z "$age" ]; then
+    k -n exchange logs deployment/collector -c collector --tail=20 || true
+    die "60초 동안 신선한 시세(5초 이내)가 없습니다. 수집기가 업비트에 접속하지 못하면 PRICE_STUB=1 $0 --with-apps 로 다시 실행하세요"
+  fi
+  echo "시세 신선함: ${age}ms 전에 갱신"
+
+  # B의 판정기는 ticks로 체결가의 신선함(fresh)을 확인한다. 비어 있으면 판정 불가로 빠질 뿐이라 경고만 함
+  local n
+  n="$(k -n exchange exec statefulset/postgres -- psql -U exchange -d exchange -tAc \
+    "SELECT count(*) FROM ticks WHERE received_at > now() - interval '30 seconds'" 2>/dev/null | tr -d '\r ')" || n=""
+  if [ "${n:-0}" -gt 0 ] 2>/dev/null; then
+    echo "ticks 최근 30초: ${n}건"
+  else
+    warn "ticks에 최근 30초 시세가 없습니다. 수집기 로그를 확인하세요 (B의 fresh 판정은 NOT_EVALUATED가 됨)"
+  fi
+
+  k -n exchange get pods -l 'app in (collector, order, web, dev-push)'
+}
+
 summary() {
   cat <<EOF
 
@@ -138,7 +230,18 @@ summary() {
     kubectl --context $CONTEXT -n monitoring port-forward svc/kps-grafana 3000:80        # admin / admin
     kubectl --context $CONTEXT -n chaos-mesh port-forward svc/chaos-dashboard 2333
     kubectl --context $CONTEXT -n exchange port-forward svc/postgres 5432
+EOF
+  if [ "$WITH_APPS" = "1" ]; then
+    cat <<EOF
+    kubectl --context $CONTEXT -n exchange port-forward svc/order 8000           # 주문 API
+EOF
+    [ -f "$ROOT/web/deploy-local.sh" ] && cat <<EOF
+    kubectl --context $CONTEXT -n exchange port-forward svc/web 8080:80          # 데모 화면 http://localhost:8080
+EOF
+  fi
+  cat <<EOF
 
+  시세: $([ "$PRICE_STUB" = "1" ] && echo "stub (수집기 시세가 오면 stub이 스스로 멈춤)" || echo "수집기 (stub 없음)")
   삭제: infra/local/down.sh
 EOF
 }
@@ -151,5 +254,11 @@ install_monitoring
 install_chaos_mesh
 install_data
 install_price_stub
+if [ "$WITH_APPS" = "1" ]; then
+  deploy_collector
+  deploy_order
+  deploy_web
+fi
 verify
+[ "$WITH_APPS" = "1" ] && verify_apps
 summary
