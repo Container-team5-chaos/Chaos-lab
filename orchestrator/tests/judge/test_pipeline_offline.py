@@ -230,7 +230,7 @@ def test_run_ok_passes():
         assert checks[cid].outcome is Outcome.PASS, cid
         assert checks[cid].value == 0, cid
     assert checks["k6_exit"].outcome is Outcome.PASS
-    # 1차 미구현 구간 SLO는 required: false라 보고만 한다
+    # 구간 SLO는 표본 부족(LOW_SAMPLES)이고 required: false라 보고만 한다
     assert checks["order_p95_k6"].outcome is Outcome.INCONCLUSIVE
     assert checks["order_p95_k6"].required is False
     self_check = checks["judge_self_check"]
@@ -731,6 +731,27 @@ def test_k6_oom_exit_is_load_aborted(tmp_path):
     assert R.LOAD_ABORTED in v.reasons
     assert by_id(v.checks)["k6_exit"].reasons == (R.LOAD_ABORTED,)
     assert v.load["k6_exit_reason"] == "OOMKilled"
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_sigint_exit_is_normal_only_with_stop_flag(tmp_path, flag):
+    """SIGINT로 멈춘 k6(105)는 fetch가 본 정지 표시가 있을 때만 정상이다(설계 4.8)."""
+    run = copy_run(tmp_path)
+
+    def sigint(doc):
+        doc["containers"]["k6"] = {"exitCode": 105, "reason": "Error"}
+        doc["stop_requested"] = flag
+        return doc
+
+    edit_json(run / "k6" / "pod-status.json", sigint)
+    v = run_eval(run)
+    assert (v.load["k6_stop_requested"], v.load["stopped_by_judge"]) == (flag, flag)
+    if flag:
+        assert v.verdict is Outcome.PASS
+    else:
+        assert v.verdict is Outcome.INCONCLUSIVE
+        assert by_id(v.checks)["k6_exit"].reasons == (R.LOAD_ABORTED,)
+        assert by_id(v.checks)["orphans"].reasons == (R.SENT_LOG_INCOMPLETE,)
 
 
 def test_token_key_in_summary_is_safety_violation(tmp_path):

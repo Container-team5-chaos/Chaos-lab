@@ -29,6 +29,16 @@ if [ "$chaos" != "0" ] || [ "$k6" != "0" ]; then
   exit 1
 fi
 
+# 외부 체결 여부가 미확정인 주문의 전달 기록/예약을 지우면 정산을 잃으므로 차단한다.
+external_table="$(psql_exec -tAc "SELECT to_regclass('order_external') IS NOT NULL" | tr -d '\r[:space:]')"
+if [ "$external_table" = "t" ]; then
+  pending="$(psql_exec -tAc "SELECT count(*) FROM orders JOIN order_external USING(client_order_id) WHERE status IN ('pending','unknown')" | tr -d '\r[:space:]')"
+  if [ "$pending" != "0" ]; then
+    echo "미확정 외부 주문 ${pending}건이 있어 초기화를 중단합니다. 체결/예약 상태를 먼저 확인하세요." >&2
+    exit 1
+  fi
+fi
+
 if [ "$YES" -ne 1 ]; then
   read -r -p "[$CONTEXT] 주문·포지션·계좌를 모두 지우고 다시 채웁니다. 계속할까요? [y/N] " answer
   [ "$answer" = "y" ] || [ "$answer" = "Y" ] || { echo "취소"; exit 0; }

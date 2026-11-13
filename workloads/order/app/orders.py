@@ -9,6 +9,7 @@ import asyncpg
 from .config import STALE_MS
 from .metrics import PRICE_AGE
 from .schemas import OrderRequest
+from .reservations import reserved
 
 
 class Rejected(Exception):
@@ -84,9 +85,12 @@ async def place_order(pool, redis, req: OrderRequest):
                 )
                 held = pos["volume"] if pos else Decimal(0)
                 avg = pos["avg_price"] if pos else Decimal(0)
+                reserved_krw, reserved_volume = await reserved(
+                    conn, req.user_id, req.market
+                )
 
                 if req.side == "bid":
-                    if acc["krw"] < amount:
+                    if acc["krw"] - reserved_krw < amount:
                         raise Rejected(422, "insufficient_balance")
                     new_volume = held + req.volume
                     new_avg = ((held * avg + req.volume * price) / new_volume).quantize(
@@ -94,7 +98,7 @@ async def place_order(pool, redis, req: OrderRequest):
                     )
                     krw_delta = -amount
                 else:
-                    if held < req.volume:
+                    if held - reserved_volume < req.volume:
                         raise Rejected(422, "insufficient_volume")
                     new_volume = held - req.volume
                     new_avg = avg  # 매도는 평균 매수가를 바꾸지 않음
@@ -139,14 +143,20 @@ async def place_order(pool, redis, req: OrderRequest):
 
 async def get_account(pool, user_id: str):
     async with pool.acquire() as conn:
-        acc = await conn.fetchrow(
-            "SELECT krw FROM accounts WHERE user_id = $1", user_id
-        )
-        if acc is None:
-            raise Rejected(404, "user_not_found")
-        positions = await conn.fetch(
-            "SELECT market, volume, avg_price FROM positions "
-            "WHERE user_id = $1 AND volume > 0 ORDER BY market",
-            user_id,
-        )
-        return acc, positions
+        async with conn.transaction(isolation="repeatable_read", readonly=True):
+            acc = await conn.fetchrow(
+                "SELECT krw FROM accounts WHERE user_id = $1", user_id
+            )
+            if acc is None:
+                raise Rejected(404, "user_not_found")
+            held_krw, _ = await reserved(conn, user_id)
+            positions = await conn.fetch(
+                "SELECT market, volume, avg_price FROM positions "
+                "WHERE user_id = $1 AND volume > 0 ORDER BY market",
+                user_id,
+            )
+            result = []
+            for pos in positions:
+                _, held_volume = await reserved(conn, user_id, pos["market"])
+                result.append({**dict(pos), "reserved_volume": held_volume})
+            return {**dict(acc), "reserved_krw": held_krw}, result

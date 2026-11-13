@@ -31,7 +31,10 @@
      RESPONSE_SCHEMA_UNCONFIRMED·200 원문 못 읽음·보낸 본문 없음(MISMATCH), 200 원문을 못 읽었고
      DB 행도 없음(LOST). 이미 FAIL이면 FAIL이 남는다(설계 5.3, 5.7 규칙 4).
    - sql·check(fresh): invariants.item_results. k6 exit_code: verdict.k6_exit_to_checks.
-   - client·prom: 1차 미구현(설계 5.5, 5.9)이라 INCONCLUSIVE(NOT_EVALUATED). required: false면 보고만 한다.
+   - client ack_p95_ms·sys_err_ratio: 구간별 k6 기록 판정(설계 5.5, client.evaluate_client_check).
+     구간 범위·시계 차이는 class와 같은 _phase_scope를 쓴다. 표본이 모자라면 LOW_SAMPLES.
+   - 그 밖 client stat·prom: 미구현(설계 5.5, 5.9, 5.10)이라 INCONCLUSIVE(NOT_EVALUATED).
+     required: false면 보고만 한다.
 5. 가드(설계 5.6, 계약 명세 8). 구현한 것: safety(종목·user_id 형식·run 키·1 VU = 1 user·비밀 키),
    account_set, fill_coverage, sell_coverage(ask 체결), load_coverage, fault_in_load,
    fault_effect(class_sub는 분류 결과, observe는 run.json·marks.local의 obs 값, 없으면 raw/k8s/obs.json), db_quiescent.
@@ -66,9 +69,12 @@ from .classify import (
     summarize,
 )
 from .client import (
+    CLIENT_PHASE_STATS,
     achieved_ratio,
     applicable_phases,
+    evaluate_client_check,
     is_fault_run,
+    phase_stat,
     phase_windows,
     phases_from_marks,
     plan_duration_ms,
@@ -224,6 +230,7 @@ class Evidence:
     summary_token_key: 읽지 못한 summary 원문에서 "...token"·"...authorization" 키를 찾았다
       (계약 명세 8 safety).
     clock_offset_ms: None이면 시계 차이를 모른다(derived.json 없음).
+    k6_stop_requested: pod-status.json stop_requested(fetch가 /out/STOP_REQUESTED를 봤다).
     """
 
     log: K6Log | None
@@ -237,6 +244,7 @@ class Evidence:
     manifest: Mapping[str, str | None] = field(default_factory=dict, hash=False)
     summary_error: str | None = None
     summary_token_key: bool = False
+    k6_stop_requested: bool = False
 
     @property
     def manifest_sha256(self) -> str:
@@ -350,9 +358,12 @@ def load_evidence(evidence: str | Path) -> Evidence:
 
     code: int | None = None
     reason: str | None = None
+    stop_requested = False
     pod_raw = _read(root, POD_STATUS_PATH, manifest)
     if pod_raw is not None:
-        code, reason = _pod_exit(_json_obj(pod_raw, POD_STATUS_PATH), POD_STATUS_PATH)
+        pod_doc = _json_obj(pod_raw, POD_STATUS_PATH)
+        code, reason = _pod_exit(pod_doc, POD_STATUS_PATH)
+        stop_requested = pod_doc.get("stop_requested") is True
 
     offset: int | None = None
     derived_raw = _read(root, DERIVED_PATH, manifest)
@@ -382,6 +393,7 @@ def load_evidence(evidence: str | Path) -> Evidence:
         manifest=dict(sorted(manifest.items())),
         summary_error=summary_error,
         summary_token_key=summary_token,
+        k6_stop_requested=stop_requested,
     )
 
 
@@ -436,6 +448,15 @@ def account_scope(
 # ---------------------------------------------------------------- 판정 상태
 
 
+def _stopped_by_judge(ctx: RunContext, ev: Evidence) -> bool:
+    """우리가 k6를 SIGINT로 멈췄다(종료 코드 105 인정, 설계 4.8).
+
+    근거는 둘 중 하나다: run.json obs.stopped_by_judge(사람이 적음) 또는
+    pod-status.json stop_requested(정지 전에 만든 /out/STOP_REQUESTED를 fetch가 봄).
+    """
+    return ctx.obs.get("stopped_by_judge") is True or ev.k6_stop_requested
+
+
 @dataclass(frozen=True)
 class _State:
     ctx: RunContext
@@ -466,7 +487,7 @@ class _State:
 
     @property
     def stopped_by_judge(self) -> bool:
-        return self.ctx.obs.get("stopped_by_judge") is True
+        return _stopped_by_judge(self.ctx, self.ev)
 
 
 def _meta(spec: Mapping[str, Any], kind: str, ov: str) -> tuple[str, str, bool, str]:
@@ -639,6 +660,19 @@ def _k6_checks(st: _State, spec: Mapping[str, Any]) -> list[CheckResult]:
     )
 
 
+def _client_check(st: _State, spec: Mapping[str, Any]) -> CheckResult:
+    """k6 기록 기반 구간 SLO(설계 5.5). 기록이 없으면 NOT_EVALUATED(설계 5.7 규칙 4)."""
+    kind = str(spec["kind"])
+    _, chosen, early = _phase_scope(st, spec, spec.get("phases") or (), kind, "fail")
+    if early is not None:
+        return early
+    if st.log is None:
+        return _result(
+            spec, Outcome.INCONCLUSIVE, kind=kind, ov="fail", reasons=(R.NOT_EVALUATED,)
+        )
+    return evaluate_client_check(spec, st.log, chosen)
+
+
 def _checks(st: _State, inv_items: Mapping[str, CheckResult]) -> list[CheckResult]:
     out: list[CheckResult] = []
     for spec in st.crit.checks:
@@ -668,6 +702,8 @@ def _checks(st: _State, inv_items: Mapping[str, CheckResult]) -> list[CheckResul
             out.append(r)
         elif kind == "k6":
             out.extend(_k6_checks(st, spec))
+        elif kind == "client" and spec.get("stat") in CLIENT_PHASE_STATS:
+            out.append(_client_check(st, spec))
         else:
             section = "설계 5.5, 1차" if kind == "client" else "설계 5.9, 2차"
             if kind == "client" and spec.get("stat") == "recovery":
@@ -1169,7 +1205,7 @@ def _integrity(st: _State, inv_results: Sequence[InvariantResult]) -> dict[str, 
 
 
 def _client(st: _State) -> dict[str, Any]:
-    """구간별 n(intent 수), 달성률, filled·ask filled 수(설계 5.5). p95·오류율은 1차 미구현이다."""
+    """구간별 n(intent 수), 달성률, ACK p95·오류율(표본 부족이면 None), filled·ask filled 수(설계 5.5)."""
     phases: dict[str, Any] = {}
     log = st.log
     if log is None:
@@ -1180,6 +1216,8 @@ def _client(st: _State) -> dict[str, Any]:
             "to_ms": b,
             "n": sum(1 for it in log.intents.values() if a <= it.t < b),
             "achieved_ratio": _ratio(st, (a, b)),
+            "ack_p95_ms": phase_stat(log, "ack_p95_ms", (a, b))[0],
+            "sys_err_ratio": phase_stat(log, "sys_err_ratio", (a, b))[0],
         }
         if st.result is not None:
             entry["filled"] = count_filled(
@@ -1204,6 +1242,7 @@ def _load(st: _State) -> dict[str, Any]:
         "k6_exit_code": st.ev.k6_exit_code,
         "k6_exit_reason": st.ev.k6_exit_reason,
         "stopped_by_judge": st.stopped_by_judge,
+        "k6_stop_requested": st.ev.k6_stop_requested,
         "profile": rs.profile if rs is not None else None,
         "vus": rs.vus if rs is not None else None,
         "plan_duration_ms": plan_duration_ms(rs.plan) if rs is not None else None,
@@ -1324,7 +1363,13 @@ def assess(
         lc = _missing_log_check()
     else:
         sha_ok = None if ev.remote_sha is None else sha_matches(log, ev.remote_sha)
-        lc = log_complete(log, ev.summary, ev.k6_exit_code, sha_ok)
+        lc = log_complete(
+            log,
+            ev.summary,
+            ev.k6_exit_code,
+            sha_ok,
+            stopped=_stopped_by_judge(ctx, ev),
+        )
         if ev.summary_error is not None:
             why = dict(lc.detail.get("why", {}))
             why[COND_COUNTERS] = f"summary.json을 읽지 못했다({ev.summary_error})"

@@ -74,6 +74,12 @@ spec:
               value: {{ .Values.config.staleMs | quote }}
             - name: DB_POOL_SIZE
               value: {{ .Values.config.dbPoolSize | quote }}
+            - name: ADAPTER_URL
+              value: {{ .Values.config.adapterUrl | quote }}
+            - name: ADAPTER_TIMEOUT_SECONDS
+              value: {{ .Values.config.adapterTimeoutSeconds | quote }}
+            - name: ADAPTER_POLL_SECONDS
+              value: {{ .Values.config.adapterPollSeconds | quote }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -25,7 +25,7 @@ class OrderRequest(BaseModel):
     @field_validator("volume")
     @classmethod
     def volume_valid(cls, v: Decimal) -> Decimal:
-        if v <= 0:
+        if not v.is_finite() or v <= 0 or v >= Decimal("1e22"):
             raise ValueError("수량은 0보다 커야 함")
         if v.as_tuple().exponent < -8:
             raise ValueError("수량은 소수점 8자리까지")
@@ -38,7 +38,7 @@ def dec(d: Decimal | None) -> str | None:
 
 
 def order_to_dict(row, replayed: bool) -> dict:
-    return {
+    result = {
         "order_id": row["id"],
         "client_order_id": row["client_order_id"],
         "user_id": row["user_id"],
@@ -51,3 +51,6 @@ def order_to_dict(row, replayed: bool) -> dict:
         "filled_at": row["filled_at"].isoformat() if row["filled_at"] else None,
         "replayed": replayed,
     }
+    if row.get("execution_mode") == "adapter":
+        result.update(execution_mode="adapter", reason=row.get("reason"))
+    return result
