@@ -65,7 +65,7 @@
 | seed 계좌(`db/seed.sql`) | 앱 팀 | k6 setup abort, judge `account_set` 가드 |
 | postgres local trust, 클러스터 DB 계정·DB 이름 | 앱·인프라 | 7.2 |
 | 서버 지표(`app/metrics.py`), PodMonitor(L788–799) | 앱·인프라 | PromQL 기준은 `required: false` |
-| `mirror/k6:2.3.0`(우리 소유, L958) | 팀 인프라 담당 | 11/12까지 push 요청 |
+| `grafana/k6:2.3.0`(공식 이미지, 11/13 미러에서 변경) | 없음 | Docker Hub에서 바로 받는다 |
 
 **1.3 만들지 않는 것**: runner·gates·inject·cleanup 코드, 클러스터 안 judge Pod, SA용 Role, NetworkPolicy 변경, DB 드라이버, toolbox, Indexed Job(L630), Grafana 패널, S3 자동 업로드, 판정 결과의 Prometheus 내보내기(L639), 주문 서비스 코드 수정(팀원 소유, 읽기만 한다).
 
@@ -620,7 +620,7 @@ checks: [{id: order_p95_k6, required: false}, {id: order_err_k6, required: false
 | runner·inject | run.json v1(`db`, `extra_accounts`는 user_id), epoch ms, Job 재적용 금지, fetch 전 Job 삭제 금지, run 중·수집 전 seed 금지, 장애 선택자에서 k6 Pod 제외. 장애 키는 run당 계좌 하나(리허설 idx0, 시연 발표자) | 11/8 |
 | 앱 팀(주문 서비스 담당) | ① 클러스터 DB 계정·DB 이름, postgres Pod·컨테이너, local trust 유지(가능하면 읽기 전용 역할) ② 커밋 뒤 장애 훅 부재: crash-after-commit·시연용 FAULT 훅 계획 ③ 주문 조회 API 부재: `GET /orders/{client_order_id}` 계획(없어도 judge는 DB로 확정) ④ 거절 미저장 확인: 저장하게 되면 FILL_STATE·REJECT_COMMITTED 규칙을 바꾼다 ⑤ `initial_krw`: 클러스터 seed도 계좌마다 10,000,000인지 ⑥ 클러스터 `STALE_MS` ⑦ `order_duration_seconds` 0.3 버킷 ⑧ 계약 변경 알림 ⑨ 통일본에 반올림 명시: 코드는 amount를 소수 4자리 ROUND_DOWN, avg_price를 8자리 quantize(ROUND_HALF_EVEN)한다. judge는 코드를 따른다 ⑩ `filled_at` 형식 통일: 통일본 예시는 밀리초 `Z`, 코드(`isoformat()`)는 마이크로초 `+00:00`다. judge는 둘 다 읽고 응답 자릿수까지 비교한다(5.3) | ①⑤ 11/10 |
 | 수집기 담당 | ticks 기록 주체와 시점(`received_at` 시계), Redis `price:{market}` 갱신 주기. `fresh`가 기댄다 | 11/12 |
-| 팀 인프라 담당 | `mirror/k6:2.3.0` push와 이미지 도구(sh, gzip, sha256sum, wget, date, kill) 확인. k6 podSelector = `app.kubernetes.io/name: k6`(L893). 주문 서비스·postgres namespace, Service 이름·포트(앱 8000), Pod 라벨. 한계 run의 replica 고정 | 11/12 |
+| 팀 인프라 담당 | k6 podSelector = `app.kubernetes.io/name: k6`(L893). 주문 서비스·postgres namespace, Service 이름·포트(앱 8000), Pod 라벨. 한계 run의 replica 고정 | 11/12 |
 | 관리자(확인 필요: 관리자) | Prometheus 주소·인증·scrape 간격·보존, exchange → monitoring ingress 허용. 팀 Role 실제 내용(L995). ephemeral-storage 쿼터. `do-not-disrupt`(k6 Pod, 11/24–11/26). 노드 시간 동기화, cgroup 버전. 노트북 S3 `results/` 쓰기. 부하 시험 시간대(L1004). 시연장 IP | 11/12 |
 
 ## 11. 위험과 확인 필요

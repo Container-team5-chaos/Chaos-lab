@@ -30,7 +30,10 @@
      RESPONSE_SCHEMA_UNCONFIRMED·200 원문 못 읽음·보낸 본문 없음(MISMATCH), 200 원문을 못 읽었고
      DB 행도 없음(LOST). 이미 FAIL이면 FAIL이 남는다(설계 5.3, 5.7 규칙 4).
    - sql·check(fresh): invariants.item_results. k6 exit_code: verdict.k6_exit_to_checks.
-   - client·prom: 1차 미구현(설계 5.5, 5.9)이라 INCONCLUSIVE(NOT_EVALUATED). required: false면 보고만 한다.
+   - client ack_p95_ms·sys_err_ratio: 구간별 k6 기록 판정(설계 5.5, client.evaluate_client_check).
+     구간 범위·시계 차이는 class와 같은 _phase_scope를 쓴다. 표본이 모자라면 LOW_SAMPLES.
+   - 그 밖 client stat·prom: 미구현(설계 5.5, 5.9, 5.10)이라 INCONCLUSIVE(NOT_EVALUATED).
+     required: false면 보고만 한다.
 5. 가드(설계 5.6, 계약 명세 8). 구현한 것: safety(종목·user_id 형식·run 키·1 VU = 1 user·비밀 키),
    account_set, fill_coverage, sell_coverage(ask 체결), load_coverage, fault_in_load,
    fault_effect(class_sub는 분류 결과, observe는 run.json·marks.local의 obs 값), db_quiescent.
@@ -65,9 +68,12 @@ from .classify import (
     summarize,
 )
 from .client import (
+    CLIENT_PHASE_STATS,
     achieved_ratio,
     applicable_phases,
+    evaluate_client_check,
     is_fault_run,
+    phase_stat,
     phase_windows,
     phases_from_marks,
     plan_duration_ms,
@@ -644,6 +650,19 @@ def _k6_checks(st: _State, spec: Mapping[str, Any]) -> list[CheckResult]:
     )
 
 
+def _client_check(st: _State, spec: Mapping[str, Any]) -> CheckResult:
+    """k6 기록 기반 구간 SLO(설계 5.5). 기록이 없으면 NOT_EVALUATED(설계 5.7 규칙 4)."""
+    kind = str(spec["kind"])
+    _, chosen, early = _phase_scope(st, spec, spec.get("phases") or (), kind, "fail")
+    if early is not None:
+        return early
+    if st.log is None:
+        return _result(
+            spec, Outcome.INCONCLUSIVE, kind=kind, ov="fail", reasons=(R.NOT_EVALUATED,)
+        )
+    return evaluate_client_check(spec, st.log, chosen)
+
+
 def _checks(st: _State, inv_items: Mapping[str, CheckResult]) -> list[CheckResult]:
     out: list[CheckResult] = []
     for spec in st.crit.checks:
@@ -673,6 +692,8 @@ def _checks(st: _State, inv_items: Mapping[str, CheckResult]) -> list[CheckResul
             out.append(r)
         elif kind == "k6":
             out.extend(_k6_checks(st, spec))
+        elif kind == "client" and spec.get("stat") in CLIENT_PHASE_STATS:
+            out.append(_client_check(st, spec))
         else:
             section = "설계 5.5, 1차" if kind == "client" else "설계 5.9, 2차"
             if kind == "client" and spec.get("stat") == "recovery":
@@ -1172,7 +1193,7 @@ def _integrity(st: _State, inv_results: Sequence[InvariantResult]) -> dict[str, 
 
 
 def _client(st: _State) -> dict[str, Any]:
-    """구간별 n(intent 수), 달성률, filled·ask filled 수(설계 5.5). p95·오류율은 1차 미구현이다."""
+    """구간별 n(intent 수), 달성률, ACK p95·오류율(표본 부족이면 None), filled·ask filled 수(설계 5.5)."""
     phases: dict[str, Any] = {}
     log = st.log
     if log is None:
@@ -1183,6 +1204,8 @@ def _client(st: _State) -> dict[str, Any]:
             "to_ms": b,
             "n": sum(1 for it in log.intents.values() if a <= it.t < b),
             "achieved_ratio": _ratio(st, (a, b)),
+            "ack_p95_ms": phase_stat(log, "ack_p95_ms", (a, b))[0],
+            "sys_err_ratio": phase_stat(log, "sys_err_ratio", (a, b))[0],
         }
         if st.result is not None:
             entry["filled"] = count_filled(

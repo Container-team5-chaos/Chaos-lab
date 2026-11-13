@@ -229,7 +229,7 @@ def test_run_ok_passes():
         assert checks[cid].outcome is Outcome.PASS, cid
         assert checks[cid].value == 0, cid
     assert checks["k6_exit"].outcome is Outcome.PASS
-    # 1차 미구현 구간 SLO는 required: false라 보고만 한다
+    # 구간 SLO는 표본 부족(LOW_SAMPLES)이고 required: false라 보고만 한다
     assert checks["order_p95_k6"].outcome is Outcome.INCONCLUSIVE
     assert checks["order_p95_k6"].required is False
     self_check = checks["judge_self_check"]

@@ -11,3 +11,6 @@ STALE_MS = int(
 )  # 이보다 오래된 시세로는 체결하지 않음
 DB_POOL_SIZE = int(os.environ.get("DB_POOL_SIZE", "10"))  # Pod당 DB 커넥션 수
 SUPPORTED_MARKETS = {"KRW-BTC"}
+ADAPTER_URL = os.getenv("ADAPTER_URL", "").rstrip("/")
+ADAPTER_TIMEOUT = float(os.getenv("ADAPTER_TIMEOUT_SECONDS", "5"))
+ADAPTER_POLL = float(os.getenv("ADAPTER_POLL_SECONDS", "0.5"))

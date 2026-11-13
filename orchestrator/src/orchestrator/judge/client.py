@@ -1,7 +1,7 @@
 """k6 기록 기반 구간 SLO와 회복 시간(설계 5.2 6단계, 5.5, 5.10).
 
-1차 구현: nearest_rank, planned_arrivals, achieved_ratio, load_window, phase_windows(순수 계산).
-나머지(ack_p95_ms, sys_err_ratio, client_checks, recovery_time, precheck)는 시그니처만 있다.
+1차 구현: nearest_rank, planned_arrivals, achieved_ratio, load_window, phase_windows(순수 계산),
+ack_p95_ms, sys_err_ratio, client_checks(구간 SLO). recovery_time, precheck(2차)는 시그니처만 있다.
 
 - 분위수는 nearest-rank `x[ceil(q·n) − 1]`이다(설계 5.2 6단계). k6 threshold의 선형 보간과
   다르므로 SLO 판정은 judge 하나로만 한다(설계 4.7).
@@ -13,16 +13,26 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from fractions import Fraction
 from numbers import Rational
 from typing import Any, TypeVar
 
+from . import reasons as R
 from .criteria import duration_ms
 from .errors import InputError
-from .model import CheckResult, Classified, Criteria, Intent, K6Log, RunContext
+from .model import (
+    CheckResult,
+    Classified,
+    Criteria,
+    Intent,
+    K6Log,
+    Outcome,
+    RunContext,
+)
 from .transport import Transports
+from .verdict import evaluate_count_check
 
 __all__ = [
     "K6_END_MARK",
@@ -30,13 +40,17 @@ __all__ = [
     "PLAN_EXECUTOR",
     "RATIO_PLACES",
     "RecoveryResult",
+    "CLIENT_PHASE_STATS",
     "achieved_ratio",
     "ack_p95_ms",
     "applicable_phases",
     "client_checks",
+    "evaluate_client_check",
     "is_fault_run",
     "load_window",
+    "min_samples",
     "nearest_rank",
+    "phase_stat",
     "phase_windows",
     "phases_from_marks",
     "plan_duration_ms",
@@ -366,34 +380,161 @@ def phase_windows(
     return dict(sorted(out.items()))
 
 
-# ---------------------------------------------------------------- 구간 SLO(설계 5.5) 1차, 미구현
+# ---------------------------------------------------------------- 구간 SLO(설계 5.5) 1차
+
+P95_Q = Decimal("0.95")
+SAMPLE_Q = P95_Q  # sys_err_ratio 표본 기준에도 같은 q를 쓴다(우리 설정값, n ≥ 400)
+# 1차에 구간별로 재는 stat. 나머지(achieved_ratio·filled·sell_filled는 가드, recovery는 5.10)는 NOT_EVALUATED
+CLIENT_PHASE_STATS = frozenset({"ack_p95_ms", "sys_err_ratio"})
+
+
+def min_samples(q: Decimal | Fraction | str = P95_Q) -> int:
+    """표본 하한 `n ≥ 20/(1−q)`(설계 5.5). q=0.95면 400."""
+    qf = _exact(q, "q")
+    if not 0 < qf < 1:
+        raise ValueError(f"q는 0 < q < 1이어야 한다(받음: {q!r})")
+    return math.ceil(Fraction(20) / (1 - qf))
+
+
+def _in(t: int, window: tuple[int, int]) -> bool:
+    return window[0] <= t < window[1]
+
+
+def _ack_ms(log: K6Log, window: tuple[int, int]) -> list[Decimal]:
+    """키마다 첫 ACK 시도의 ms. 구간 배정은 그 시도의 t0다(설계 5.5)."""
+    out = []
+    for r in log.results.values():
+        a = r.first_ack
+        if a is not None and _in(a.t0, window):
+            out.append(Decimal(repr(float(a.ms))))
+    return out
 
 
 def ack_p95_ms(
-    log: K6Log, window: tuple[int, int], *, q: Decimal = Decimal("0.95")
-) -> Any:
+    log: K6Log, window: tuple[int, int], *, q: Decimal = P95_Q
+) -> tuple[Decimal | None, int]:
     """ACK 받은 첫 시도의 ms로 낸 nearest-rank 분위수. 구간 배정은 t0(설계 5.5).
 
-    표본이 `n ≥ 20/(1−q)`보다 적으면 LOW_SAMPLES다.
+    (값, 표본 수)를 낸다. 표본이 `n ≥ 20/(1−q)`보다 적으면 값은 None(LOW_SAMPLES, 부르는 쪽 몫)이다.
     """
-    raise NotImplementedError("설계 5.5, 1차")
+    xs = _ack_ms(log, window)
+    if len(xs) < min_samples(q):
+        return None, len(xs)
+    return nearest_rank(xs, q), len(xs)
+
+
+def _err_counts(log: K6Log, window: tuple[int, int]) -> tuple[int, int]:
+    """(0·5xx 수, 분모). 키마다 첫 시도(n이 가장 작은 것)를 t0로 구간에 넣는다. 4xx는 분모에서 뺀다."""
+    bad = total = 0
+    for r in log.results.values():
+        if not r.atts:
+            continue
+        a = min(r.atts, key=lambda x: x.n)
+        if not _in(a.t0, window) or 400 <= a.st < 500:
+            continue
+        total += 1
+        bad += a.st == 0 or a.st >= 500
+    return bad, total
 
 
 def sys_err_ratio(log: K6Log, window: tuple[int, int]) -> Decimal | None:
-    """첫 시도 중 0·5xx 비율. 4xx는 분모에서 뺀다(업무 거절은 성공, 설계 5.5)."""
-    raise NotImplementedError("설계 5.5, 1차")
+    """첫 시도 중 0·5xx 비율. 4xx는 분모에서 뺀다(업무 거절은 성공, 설계 5.5).
+
+    분모가 0이면 None. 결과는 소수 6자리 올림이다(`<` 기준에서 FAIL을 PASS로 바꾸지 않는다).
+    """
+    bad, total = _err_counts(log, window)
+    if total == 0:
+        return None
+    scaled = math.ceil(Fraction(bad, total) * 10**RATIO_PLACES)
+    return Decimal(f"{scaled}E-{RATIO_PLACES}")
+
+
+def phase_stat(
+    log: K6Log, stat: str, window: tuple[int, int]
+) -> tuple[Decimal | None, int, tuple[str, ...]]:
+    """구간 하나의 (측정값, 표본 수, 사유). 표본이 모자라면 (None, n, (LOW_SAMPLES,))."""
+    if stat == "ack_p95_ms":
+        v, n = ack_p95_ms(log, window)
+    elif stat == "sys_err_ratio":
+        _, n = _err_counts(log, window)
+        v = sys_err_ratio(log, window) if n >= min_samples(SAMPLE_Q) else None
+    else:
+        raise ValueError(f"1차 stat이 아니다: {stat!r}")
+    return v, n, (() if v is not None else (R.LOW_SAMPLES,))
+
+
+def evaluate_client_check(
+    spec: Mapping[str, Any], log: K6Log, windows: Mapping[str, tuple[int, int]]
+) -> CheckResult:
+    """kind: client 기준 하나를 구간마다 따로 판정해 합친다(설계 5.5, 5.7).
+
+    windows: 구간 이름 → 창(phases 거르기·시계 보정은 호출자 몫). 한 구간이라도 FAIL이면 FAIL,
+    아니면 INCONCLUSIVE(LOW_SAMPLES 등)가 하나라도 있으면 INCONCLUSIVE, 그 밖은 PASS다.
+    value는 구간 → 측정값이다.
+    """
+    stat = str(spec["stat"])
+    per: dict[str, CheckResult] = {}
+    samples: dict[str, int] = {}
+    for p, w in windows.items():
+        v, n, codes = phase_stat(log, stat, w)
+        samples[p] = n
+        r = evaluate_count_check(spec, {stat: v})
+        per[p] = replace(r, reasons=codes) if codes else r
+    outcomes = {r.outcome for r in per.values()}
+    if Outcome.FAIL in outcomes:
+        outcome = Outcome.FAIL
+    elif Outcome.INCONCLUSIVE in outcomes or not per:
+        outcome = Outcome.INCONCLUSIVE
+    else:
+        outcome = Outcome.PASS
+    reasons = (
+        ()
+        if outcome is not Outcome.INCONCLUSIVE
+        else (sorted({c for r in per.values() for c in r.reasons}) or [R.NOT_EVALUATED])
+    )
+    first = next(iter(per.values()), evaluate_count_check(spec, {}))
+    return replace(
+        first,
+        outcome=outcome,
+        value={p: r.value for p, r in per.items()},
+        reasons=tuple(reasons),
+        detail={
+            "stat": stat,
+            "n": samples,
+            "min_samples": min_samples(SAMPLE_Q),
+            "windows": {p: list(w) for p, w in windows.items()},
+            "phase_outcomes": {p: str(r.outcome) for p, r in per.items()},
+        },
+    )
 
 
 def client_checks(
     ctx: RunContext,
     crit: Criteria,
     log: K6Log,
-    classified: Sequence[Classified],
+    classified: Sequence[Classified] = (),
+    *,
+    clock_offset_ms: int = 0,
 ) -> list[CheckResult]:
-    """kind: client 기준(ack_p95_ms, sys_err_ratio, achieved_ratio, filled, sell_filled)
-    을 구간별로 판정한다(설계 5.5, 6).
+    """kind: client 기준 중 1차 stat(ack_p95_ms, sys_err_ratio)을 구간별로 판정한다(설계 5.5, 6).
+
+    이 run에 없는 구간은 빼고, 남는 구간이 없으면 N/A다. 시계 차이·표지 없음 처리(CLOCK_SKEW,
+    NOT_EVALUATED)는 pipeline._phase_scope 몫이고, 여기서는 clock_offset_ms를 그대로 쓴다.
+    classified는 filled·sell_filled(가드 5.6)용 자리이고 1차 stat은 쓰지 않는다.
     """
-    raise NotImplementedError("설계 5.5, 1차")
+    del classified
+    wins = phase_windows(ctx, crit, log, clock_offset_ms=clock_offset_ms)
+    ok = applicable_phases(ctx, crit)
+    out = []
+    for spec in crit.checks:
+        if spec.get("kind") != "client" or spec.get("stat") not in CLIENT_PHASE_STATS:
+            continue
+        chosen = {p: wins[p] for p in spec.get("phases", ()) if p in ok and p in wins}
+        r = evaluate_client_check(spec, log, chosen)
+        if not chosen:
+            r = replace(r, outcome=Outcome.NA, reasons=())
+        out.append(r)
+    return out
 
 
 # ---------------------------------------------------------------- 회복 시간(설계 5.10) 2차

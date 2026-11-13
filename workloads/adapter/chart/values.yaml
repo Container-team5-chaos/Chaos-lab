@@ -1,0 +1,27 @@
+# 호출 제한은 프로세스당 적용되므로 단일 replica/Recreate로 운영함.
+image:
+  repository: chaos-lab-adapter
+  tag: dev
+  pullPolicy: IfNotPresent
+service:
+  port: 8000
+database:
+  secretName: postgres
+  host: postgres
+  port: 5432
+config:
+  brokerUrl: http://mock-broker.exchange.svc.cluster.local:8000
+  brokerRps: "5"
+  brokerTimeoutSeconds: "5"
+  dbPoolSize: "5"
+  maxAttempts: "8"
+  retryBaseSeconds: "1"
+  retryMaxSeconds: "30"
+  leaseSeconds: "30"
+  pollSeconds: "0.2"
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {memory: 256Mi}
+serviceMonitor:
+  enabled: true
+  interval: 5s
