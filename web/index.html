@@ -9,7 +9,7 @@
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #E9EDF2;
+    --bg: #dfe2e3;
     --panel: #FFFFFF;
     --ink: #16202C;
     --muted: #5B6878;
@@ -119,6 +119,7 @@
   .result.show { display: block; }
   .result.ok { background: #E6F2EA; color: #1D4F31; }
   .result.fail { background: var(--warn-bg); color: #6A430B; }
+  .result.wait { background: #E8EEF7; color: #1F3A5F; }
   .result button {
     margin-top: 10px; font: inherit; font-size: 14px; font-weight: 600; padding: 7px 12px;
     border: 1px solid currentColor; background: transparent; color: inherit; border-radius: var(--radius-sm); cursor: pointer;
@@ -204,6 +205,7 @@
         <dt>평균 매수가</dt><dd id="avg" class="num">-</dd>
         <dt>평가 금액</dt><dd id="valuation" class="num">-</dd>
         <dt>보유 원화</dt><dd id="krw" class="num">-</dd>
+        <dt id="reserved-label" hidden>체결 대기 예약</dt><dd id="reserved" class="num" hidden>-</dd>
         <dt>총 자산</dt><dd id="total" class="num">-</dd>
       </dl>
       <p id="acct-hint" class="hint">평가손익 = (현재가 − 평균 매수가) × 보유 수량. 3초마다 계좌를 다시 읽어요.</p>
@@ -396,6 +398,8 @@ const REASONS = {
   stale_price: "시세가 5초 넘게 오래돼 체결하지 않았어요.",
   price_unavailable: "현재가가 없어 체결하지 않았어요.",
   not_ready: "주문 서비스가 준비되지 않았어요 (종료 중이거나 DB·Redis 연결 불가).",
+  price_limit_exceeded: "증권사 체결가가 주문 때 잡아 둔 금액을 넘어 거절됐어요. 예약한 원화는 돌려받았어요.",
+  settlement_inconsistent: "증권사 응답이 주문과 맞지 않아 확인이 필요해요.",
 };
 const RETRYABLE = new Set(["stale_price", "price_unavailable", "not_ready", "network"]);
 
@@ -446,9 +450,17 @@ async function send(order) {
     state.pending = null;
     const msg = body.replayed
       ? `이미 처리된 주문이에요. 처음 체결 결과를 그대로 돌려받았고 잔고는 다시 바뀌지 않았어요.`
-      : `${label} 체결: ${btc.format(Number(body.volume))} BTC × ${won.format(Number(body.fill_price))}원 = ${won.format(Number(body.amount))}원`;
+      : filledText(label, body);
     showResult("ok", msg, body.client_order_id);
     log(`${label} ${body.replayed ? "재요청 → 기존 결과 반환(replayed)" : "체결"} ${btc.format(Number(body.volume))} BTC  #${body.client_order_id}`);
+    loadAccount();
+    return;
+  }
+  // 외부 증권사 모드(adapter): 202 접수 → 주문 조회로 체결/거절을 확인
+  if (res && (body.status === "pending" || body.status === "unknown" || (body.status === "rejected" && body.order_id != null))) {
+    state.pending = null;
+    if (!body.replayed) log(`${label} 접수 (증권사 체결 대기) ${btc.format(Number(body.volume))} BTC  #${body.client_order_id}`);
+    settle(label, body, body.replayed);
     loadAccount();
     return;
   }
@@ -459,6 +471,55 @@ async function send(order) {
   state.pending = RETRYABLE.has(reason) ? order : null;
   showResult("fail", text, order.client_order_id, Boolean(state.pending));
   log(`${label} 실패: ${reason}  #${order.client_order_id}`, true);
+}
+
+function filledText(label, o) {
+  return `${label} 체결: ${btc.format(Number(o.volume))} BTC × ${won.format(Number(o.fill_price))}원 = ${won.format(Number(o.amount))}원`;
+}
+
+/* 외부 주문 상태 표시. pending이면 조회를 이어 간다 (주문마다 하나씩) */
+const watching = new Set();
+function settle(label, o, replayed = false) {
+  const id = o.client_order_id;
+  if (o.status === "filled") {
+    showResult("ok", filledText(label, o), id);
+    log(`${label} 체결 (증권사) ${btc.format(Number(o.volume))} BTC × ${won.format(Number(o.fill_price))}원  #${id}`);
+    loadAccount();
+  } else if (o.status === "rejected") {
+    showResult("fail", REASONS[o.reason] || `증권사가 주문을 거절했어요 (${o.reason || "사유 없음"}). 예약한 금액은 돌려받았어요.`, id);
+    log(`${label} 증권사 거절: ${o.reason || "-"}  #${id}`, true);
+    loadAccount();
+  } else if (o.status === "unknown") {
+    showResult("fail", "증권사 체결 여부를 확인하지 못했어요. 예약한 금액은 그대로 묶여 있어요. 같은 주문을 새 번호로 다시 내지 마세요.", id);
+    log(`${label} 체결 확인 불가(unknown)  #${id}`, true);
+    loadAccount();
+  } else {
+    showResult("wait", replayed
+      ? "이미 접수된 주문이에요. 증권사 체결을 기다리는 중이에요."
+      : "주문이 접수됐어요. 증권사 체결을 기다리는 중이에요. 금액(수량)은 미리 예약돼요.", id);
+    watch(label, id);
+  }
+}
+async function watch(label, id) {
+  if (watching.has(id)) return;
+  watching.add(id);
+  const started = Date.now();
+  let wait = 1000;
+  try {
+    while (Date.now() - started < 10 * 60 * 1000) {  // 최대 10분 확인
+      await new Promise((r) => setTimeout(r, wait));
+      let o = null;
+      try {
+        const res = await fetch(`/api/orders/${encodeURIComponent(id)}`, { cache: "no-store" });
+        if (res.ok) o = await res.json();
+      } catch (e) { /* 일시 단절이면 다음 확인에서 다시 */ }
+      if (o && o.status !== "pending") { settle(label, o); return; }
+      wait = Math.min(5000, wait + 500);  // 오래 걸리면 천천히
+    }
+    log(`${label} 10분째 체결 대기 — 계좌의 예약 금액으로 상태를 확인하세요  #${id}`, true);
+  } finally {
+    watching.delete(id);
+  }
 }
 
 function showResult(kind, text, orderId, canRetry = false) {
@@ -482,7 +543,7 @@ function showResult(kind, text, orderId, canRetry = false) {
 
 $("submit").onclick = () => {
   const v = $("volume").value.trim();
-  if (!validVolume(v)) { showResult("fail", "수량은 0보다 큰 숫자로, 소수점 8자리까지 입력하세요.", "-"); return; }
+  if (!validVolume(v)) { showResult("fail", "수량은 0보다 큰 숫자로 소수점 8자리까지 입력하세요.", "-"); return; }
   send({ client_order_id: newOrderId(), user_id: userId(), market: MARKET, side: state.side, volume: v });
 };
 
@@ -492,14 +553,14 @@ async function loadAccount() {
     const res = await fetch(`/api/accounts/${userId()}`, { cache: "no-store" });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      $("acct-hint").textContent = `계좌를 읽지 못했어요 (${body.reason || res.status}).`;
+      $("acct-hint").textContent = `계좌를 읽지 못했습니다 (${body.reason || res.status}).`;
       return;
     }
     state.account = await res.json();
     $("acct-hint").textContent = "평가손익 = (현재가 − 평균 매수가) × 보유 수량. 3초마다 계좌를 다시 읽어요.";
     renderAccount();
   } catch (e) {
-    $("acct-hint").textContent = "주문 서비스에 연결하지 못했어요. 3초 뒤 다시 시도해요.";
+    $("acct-hint").textContent = "주문 서비스에 연결하지 못했습니다. 3초 뒤 다시 시도합니다.";
   }
 }
 function renderAccount() {
@@ -515,6 +576,12 @@ function renderAccount() {
   set("volume-held", `${btc.format(vol)} BTC`);
   set("avg", vol ? `${won.format(avg)}원` : "-");
   set("krw", `${won.format(krw)}원`);
+  // 외부 주문 체결 대기 중 예약 (adapter 모드에서만 오는 필드)
+  const resKrw = Number(a.reserved_krw || 0);
+  const resVol = pos ? Number(pos.reserved_volume || 0) : 0;
+  const hasRes = resKrw > 0 || resVol > 0;
+  $("reserved-label").hidden = !hasRes; $("reserved").hidden = !hasRes;
+  if (hasRes) set("reserved", [resKrw > 0 ? `${won.format(resKrw)}원` : "", resVol > 0 ? `${btc.format(resVol)} BTC` : ""].filter(Boolean).join(" · "));
   if (price == null) { set("valuation", "-"); set("total", "-"); set("pl", "-", "pl"); return; }
   const valuation = price * vol;
   const pl = (price - avg) * vol;
