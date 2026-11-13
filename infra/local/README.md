@@ -41,11 +41,14 @@ infra/local/down.sh            # 삭제
 
 | 환경 변수 | 기본값 | 의미 |
 | --- | --- | --- |
-| `PRICE_STUB` | 인프라만 `1`, `--with-apps` `0` | `1`이면 시세 stub도 띄움. 수집기 시세가 들어오면 stub은 스스로 멈춤 |
+| `PRICE_STUB` | 인프라만 `1`(수집기가 이미 있으면 `0`), `--with-apps` `0` | `1`이면 시세 stub도 띄움. 수집기 시세가 들어오면 stub은 영구히 멈춤(아래 참고) |
 | `ORDER_MODE` | 없음 | `baseline`이면 주문 서비스를 개선 전 설정으로 배포 |
 | `LITE` | `0` | `1`이면 Prometheus·Grafana·Chaos Mesh·metrics-server를 설치하지 않음. 앱 동작만 확인할 때 |
 
 - 수집기는 업비트에 접속해야 한다. 인터넷이 막힌 곳에서는 `PRICE_STUB=1 infra/local/up.sh --with-apps`로 실행한다.
+  이때 수집기 시세가 한 번도 들어오지 않으면 stub이 계속 쓰므로 **수집기 장애 실험은 하지 않는다**(앱 동작 확인용).
+- stub은 수집기 시세를 한 번 보면 멈추고, Redis `price-stub:yielded`에 표시를 남긴다. stub Pod가 재시작돼도 이 표시를 보고 다시 쓰지 않으므로 수집기 장애가 stub에 가려지지 않는다.
+  표시는 `up.sh`가 수집기 없이 stub을 배포할 때만 지우고, 멈춰 있던 stub을 다시 시작한다.
 - B의 판정기는 `ticks` 테이블로 체결가의 신선함을 확인한다. stub만 쓰면 `ticks`가 비어 이 항목이 판정 불가(NOT_EVALUATED)가 된다. 판정까지 확인하려면 `--with-apps`로 실제 수집기를 띄운다.
 - 이미지 3개를 빌드하므로 처음 실행은 몇 분 더 걸린다. 앱 코드를 바꾼 뒤 다시 실행하면 새 이미지로 재시작한다.
 

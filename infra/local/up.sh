@@ -10,7 +10,7 @@
 # 환경 변수:
 #   CLUSTER_NAME  기본 chaos-lab
 #   LITE          1이면 Prometheus·Grafana·Chaos Mesh·metrics-server를 설치하지 않음 (장애 주입·지표 수집 불가)
-#   PRICE_STUB    1이면 시세 stub 배포, 0이면 제거. 기본: 인프라만 1, --with-apps 0
+#   PRICE_STUB    1이면 시세 stub 배포, 0이면 제거. 기본: 인프라만 1(수집기가 이미 있으면 0), --with-apps 0
 #   ORDER_MODE    baseline 이면 주문 서비스를 개선 전 설정으로 배포 (--with-apps 일 때)
 set -euo pipefail
 
@@ -41,6 +41,7 @@ done
 
 # 앱을 띄우면 실제 수집기가 시세를 쓰므로 stub은 기본으로 끔
 # (수집기가 업비트에 못 붙는 환경이면 PRICE_STUB=1 로 함께 띄움 → 수집기 시세가 오면 stub이 스스로 멈춤)
+PRICE_STUB_SET="${PRICE_STUB+1}" # 사용자가 PRICE_STUB를 직접 줬는지
 if [ "$WITH_APPS" = "1" ]; then
   PRICE_STUB="${PRICE_STUB:-0}"
 else
@@ -137,9 +138,31 @@ install_data() {
 }
 
 install_price_stub() {
+  local has_collector=0
+  k -n exchange get deployment collector >/dev/null 2>&1 && has_collector=1
+  # 수집기가 이미 있으면(예: --with-apps 뒤에 옵션 없이 다시 실행) stub을 기본으로 띄우지 않음
+  # → 그때 수집기가 죽어 있어도 새 stub이 시세를 대신 채우지 않음
+  if [ "$PRICE_STUB" = "1" ] && [ -z "$PRICE_STUB_SET" ] && [ "$has_collector" = "1" ]; then
+    log "수집기가 이미 배포돼 있어 시세 stub을 띄우지 않음 (꼭 필요하면 PRICE_STUB=1)"
+    PRICE_STUB=0
+  fi
+  if [ "$PRICE_STUB" = "1" ] && { [ "$WITH_APPS" = "1" ] || [ "$has_collector" = "1" ]; }; then
+    warn "수집기와 stub을 함께 띄웁니다. 수집기가 업비트에 붙지 못하면 stub 시세가 계속 쓰여 수집기 장애 실험 결과가 가려집니다. 앱 동작 확인용으로만 쓰세요"
+  fi
   if [ "$PRICE_STUB" = "1" ]; then
     log "시세 stub 배포 (price:KRW-BTC 1초마다 갱신)"
+    # stub이 수집기에게 넘겼다는 표시는 수집기가 없을 때만 지운다
+    # (수집기가 있는데 지우면, stub이 재시작될 때 수집기 장애를 가릴 수 있음)
+    local cleared=0
+    if [ "$has_collector" = "0" ]; then
+      [ "$(k -n exchange exec deploy/redis -- redis-cli DEL price-stub:yielded | tr -d '\r')" = "1" ] && cleared=1
+    fi
     k apply -f "$ROOT/infra/k8s/stubs/price-stub.yaml"
+    # 표시를 지웠으면, 이미 멈춰(sleep) 있는 stub Pod를 다시 띄워야 시세를 다시 씀
+    if [ "$cleared" = "1" ]; then
+      log "수집기가 없어 멈춰 있던 stub을 다시 시작"
+      k -n exchange rollout restart deployment/price-stub
+    fi
     k -n exchange rollout status deployment/price-stub --timeout=120s
   else
     log "PRICE_STUB=0 — 시세 stub 제거"
@@ -235,6 +258,19 @@ verify_apps() {
   k -n exchange get pods -l 'app in (collector, order, web, dev-push)'
 }
 
+# 지금 시세를 누가 쓰고 있는지 (요약 출력용)
+stub_status() {
+  if [ "$PRICE_STUB" != "1" ]; then
+    echo "수집기 (stub 없음)"
+  elif [ "$(k -n exchange exec deploy/redis -- redis-cli EXISTS price-stub:yielded 2>/dev/null | tr -d '\r')" = "1" ]; then
+    echo "수집기 (stub은 수집기에게 넘기고 멈춤)"
+  elif [ "$WITH_APPS" = "1" ]; then
+    echo "⚠ stub — 수집기 시세가 아직 없음. 이 상태로는 수집기 장애 실험 불가"
+  else
+    echo "stub (수집기가 시세를 쓰기 시작하면 stub은 영구히 멈춤)"
+  fi
+}
+
 summary() {
   if [ "$LITE" = "1" ]; then
     cat <<EOF
@@ -273,7 +309,7 @@ EOF
   fi
   cat <<EOF
 
-  시세: $([ "$PRICE_STUB" = "1" ] && echo "stub (수집기 시세가 오면 stub이 스스로 멈춤)" || echo "수집기 (stub 없음)")
+  시세: $(stub_status)
   삭제: infra/local/down.sh
 EOF
 }
