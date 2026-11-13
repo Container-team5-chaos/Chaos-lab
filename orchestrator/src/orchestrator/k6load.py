@@ -15,7 +15,7 @@ from typing import Callable, Sequence
 
 # 저장소 루트의 load/k6 (orchestrator/src/orchestrator/k6load.py 기준)
 K6_DIR = Path(__file__).resolve().parents[3] / "load" / "k6"
-DEFAULT_IMAGE = "mirror/k6:2.3.0"  # 설계 L958. 팀 인프라 확인 필요
+DEFAULT_IMAGE = "grafana/k6:2.3.0"  # 공식 이미지(alpine: sh, cat, date, kill 포함)
 PROFILES = ("smoke", "steady", "accept", "demo")
 LATER_PROFILES = ("step", "replay")  # 2차
 LOAD_DEFAULTS = {
