@@ -503,8 +503,10 @@ _COLUMNS = {
     "ticks": (
         ("id", "bigint not null"),
         ("market", "text not null"),
-        ("price", "numeric(24,8) not null"),
+        ("price", "numeric not null"),
         ("received_at", "timestamp with time zone not null"),
+        ("source_ts", "bigint"),
+        ("event_id", "uuid"),
     ),
 }
 _CONSTRAINTS = (
@@ -547,6 +549,7 @@ _CONSTRAINTS = (
         "CHECK (((status <> 'filled'::text) OR ((fill_price IS NOT NULL) AND "
         "(amount IS NOT NULL) AND (filled_at IS NOT NULL))))",
     ),
+    ("ticks", "ticks_event_id_key", "UNIQUE (event_id)"),
     ("ticks", "ticks_pkey", "PRIMARY KEY (id)"),
 )
 
