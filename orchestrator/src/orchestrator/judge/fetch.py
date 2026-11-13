@@ -3,6 +3,7 @@
 `judge fetch` 순서(설계 4.8)
 1. `-l batch.kubernetes.io/job-name=<k6.job>`으로 Pod를 찾고 k6 컨테이너가 모두
    terminated가 될 때까지 기다린다. exitCode·reason을 k6/pod-status.json에 쓴다.
+   2단계 sha256sum 목록에 STOP_REQUESTED가 있으면 stop_requested: true도 적는다(105 인정).
 2. `exec -c holder -- sh -c 'sha256sum /out/*'`(출력은 k6/sha256sum.txt에 그대로),
    `exec -c holder -- gzip -c /out/orders.jsonl`(k6/orders.jsonl.gz). summary.json도 받는다.
    `kubectl cp`(tar 의존)는 쓰지 않는다. kubectl exec는 셸을 거치지 않아 글롭은 Pod 안 sh가 푼다.
@@ -57,10 +58,12 @@ ORDERS_LOG = "orders.jsonl"
 WS_LOG = "ws.jsonl"
 SUMMARY = "summary.json"
 RELEASE_PATH = "/out/RELEASE"
+# 정지 표시(k6load.STOP_FLAG). SIGINT로 멈춘 k6는 105로 끝난다. 이 파일이 있으면 우리가 멈춘 것
+STOP_FLAG = "STOP_REQUESTED"
 
 # runs/<run_id>/ 아래 산출물(설계 5.2). evaluate(pipeline)가 이 이름으로 읽는다
 LOCAL_K6_DIR = "k6"
-POD_STATUS_NAME = "pod-status.json"  # {"pod", "containers": {이름: {exitCode, reason}}}
+POD_STATUS_NAME = "pod-status.json"  # {"pod", "containers", "stop_requested"}
 DERIVED_NAME = "derived.json"  # {"offset_ms", "rtt_ms"}(ClockOffset)
 REMOTE_SHA_NAME = "sha256sum.txt"  # 원격 `sha256sum /out/*` 출력 그대로(2단계)
 LOCAL_ORDERS_GZ = "orders.jsonl.gz"
@@ -116,6 +119,7 @@ class FetchResult:
     attempts: int = 0
     errors: tuple[str, ...] = ()
     clock: ClockOffset | None = None
+    stop_requested: bool = False  # 원격 /out에 STOP_FLAG가 있었다
 
 
 def _check(cp: subprocess.CompletedProcess[bytes], what: str) -> bytes:
@@ -290,7 +294,6 @@ def fetch(
     k6_dir.mkdir(parents=True, exist_ok=True)
     pod = find_pod(ctx, tr)
     status = wait_terminated(ctx, tr, pod, timeout_s=wait_timeout_s, sleep=sleep)
-    _write_json(k6_dir / POD_STATUS_NAME, {"pod": pod, "containers": status.containers})
 
     errors: list[str] = []
     got: tuple[str, dict[str, str], bytes, bytes] | None = None
@@ -323,6 +326,9 @@ def fetch(
             else:
                 (k6_dir / SUMMARY).write_bytes(summary)
                 files[SUMMARY] = sha256_bytes(summary)
+    stop_requested = STOP_FLAG in remote  # sha256sum 목록에 있으면 정지 표시가 있다
+    pod_doc = {"pod": pod, "containers": status.containers}
+    _write_json(k6_dir / POD_STATUS_NAME, {**pod_doc, "stop_requested": stop_requested})
 
     clock: ClockOffset | None = None
     try:
@@ -346,14 +352,17 @@ def fetch(
         attempts=attempts,
         errors=tuple(errors),
         clock=clock,
+        stop_requested=stop_requested,
     )
 
 
 def stop(ctx: RunContext, tr: Transports, *, ws: bool = False) -> None:
-    """`judge stop`: `exec -c k6 -- kill -INT 1`(WS run은 `-c k6-ws`도)(설계 4.8).
+    """`judge stop`: 정지 표시 → `exec -c k6 -- kill -INT 1`(WS run은 `-c k6-ws`도)(설계 4.8).
 
     k6는 SIGINT에 테스트를 멈추고 teardown과 handleSummary를 돈다. holder는 남는다.
+    표시를 먼저 만든다(k6load.K6JobLoad.stop과 같은 순서).
     """
     pod = find_pod(ctx, tr)
+    _exec(tr, pod, HOLDER_CONTAINER, "touch", f"{REMOTE_OUT}/{STOP_FLAG}")
     for c in (K6_CONTAINER, K6_WS_CONTAINER) if ws else (K6_CONTAINER,):
         _exec(tr, pod, c, "kill", "-INT", "1")

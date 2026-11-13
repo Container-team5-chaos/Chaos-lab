@@ -210,6 +210,16 @@ def test_fetch_writes_evidence_that_evaluate_reads(ctx, tmp_path):
     assert ev.summary is not None
     assert ev.clock_offset_ms == res.clock.offset_ms
     assert not fake.of("touch")  # RELEASE는 collect가 DB 수집 뒤에 한다
+    pod_status = json.loads((tmp_path / "k6" / "pod-status.json").read_text())
+    assert pod_status["stop_requested"] is False
+
+
+def test_fetch_records_stop_flag_from_sha_list(ctx, tmp_path):
+    flag = f"{sha256_bytes(b'')}  /out/STOP_REQUESTED\n"
+    res = fetch(ctx, FakeKubectl({"sha": ok(SHA_TEXT + flag)}), tmp_path)
+    assert res.sha_ok and res.stop_requested
+    pod_status = json.loads((tmp_path / "k6" / "pod-status.json").read_text())
+    assert pod_status["stop_requested"] is True
 
 
 def test_fetch_retries_until_sha_matches(ctx, tmp_path):
@@ -261,9 +271,11 @@ def test_release_touches_flag_in_holder():
 def test_stop_sends_sigint(ctx, ws, containers):
     fake = FakeKubectl()
     F.stop(ctx, tr(fake), ws=ws)
-    kills = fake.of("kill")
-    assert [c[c.index("-c") + 1] for c in kills] == containers
-    assert all(c[-3:] == ("kill", "-INT", "1") for c in kills)
+    execs = [c for c in fake.calls if "exec" in c]
+    # 정지 표시가 먼저, SIGINT가 나중(k6load.K6JobLoad.stop과 같은 순서)
+    assert execs[0][-4:] == ("holder", "--", "touch", "/out/STOP_REQUESTED")
+    assert [c[c.index("-c") + 1] for c in execs[1:]] == containers
+    assert all(c[-3:] == ("kill", "-INT", "1") for c in execs[1:])
 
 
 @pytest.mark.parametrize(
