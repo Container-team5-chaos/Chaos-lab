@@ -221,6 +221,7 @@ class Evidence:
     summary_token_key: 읽지 못한 summary 원문에서 "...token"·"...authorization" 키를 찾았다
       (계약 명세 8 safety).
     clock_offset_ms: None이면 시계 차이를 모른다(derived.json 없음).
+    k6_stop_requested: pod-status.json stop_requested(fetch가 /out/STOP_REQUESTED를 봤다).
     """
 
     log: K6Log | None
@@ -233,6 +234,7 @@ class Evidence:
     manifest: Mapping[str, str | None] = field(default_factory=dict, hash=False)
     summary_error: str | None = None
     summary_token_key: bool = False
+    k6_stop_requested: bool = False
 
     @property
     def manifest_sha256(self) -> str:
@@ -346,9 +348,12 @@ def load_evidence(evidence: str | Path) -> Evidence:
 
     code: int | None = None
     reason: str | None = None
+    stop_requested = False
     pod_raw = _read(root, POD_STATUS_PATH, manifest)
     if pod_raw is not None:
-        code, reason = _pod_exit(_json_obj(pod_raw, POD_STATUS_PATH), POD_STATUS_PATH)
+        pod_doc = _json_obj(pod_raw, POD_STATUS_PATH)
+        code, reason = _pod_exit(pod_doc, POD_STATUS_PATH)
+        stop_requested = pod_doc.get("stop_requested") is True
 
     offset: int | None = None
     derived_raw = _read(root, DERIVED_PATH, manifest)
@@ -372,6 +377,7 @@ def load_evidence(evidence: str | Path) -> Evidence:
         manifest=dict(sorted(manifest.items())),
         summary_error=summary_error,
         summary_token_key=summary_token,
+        k6_stop_requested=stop_requested,
     )
 
 
@@ -426,6 +432,15 @@ def account_scope(
 # ---------------------------------------------------------------- 판정 상태
 
 
+def _stopped_by_judge(ctx: RunContext, ev: Evidence) -> bool:
+    """우리가 k6를 SIGINT로 멈췄다(종료 코드 105 인정, 설계 4.8).
+
+    근거는 둘 중 하나다: run.json obs.stopped_by_judge(사람이 적음) 또는
+    pod-status.json stop_requested(정지 전에 만든 /out/STOP_REQUESTED를 fetch가 봄).
+    """
+    return ctx.obs.get("stopped_by_judge") is True or ev.k6_stop_requested
+
+
 @dataclass(frozen=True)
 class _State:
     ctx: RunContext
@@ -456,7 +471,7 @@ class _State:
 
     @property
     def stopped_by_judge(self) -> bool:
-        return self.ctx.obs.get("stopped_by_judge") is True
+        return _stopped_by_judge(self.ctx, self.ev)
 
 
 def _meta(spec: Mapping[str, Any], kind: str, ov: str) -> tuple[str, str, bool, str]:
@@ -1192,6 +1207,7 @@ def _load(st: _State) -> dict[str, Any]:
         "k6_exit_code": st.ev.k6_exit_code,
         "k6_exit_reason": st.ev.k6_exit_reason,
         "stopped_by_judge": st.stopped_by_judge,
+        "k6_stop_requested": st.ev.k6_stop_requested,
         "profile": rs.profile if rs is not None else None,
         "vus": rs.vus if rs is not None else None,
         "plan_duration_ms": plan_duration_ms(rs.plan) if rs is not None else None,
@@ -1312,7 +1328,13 @@ def assess(
         lc = _missing_log_check()
     else:
         sha_ok = None if ev.remote_sha is None else sha_matches(log, ev.remote_sha)
-        lc = log_complete(log, ev.summary, ev.k6_exit_code, sha_ok)
+        lc = log_complete(
+            log,
+            ev.summary,
+            ev.k6_exit_code,
+            sha_ok,
+            stopped=_stopped_by_judge(ctx, ev),
+        )
         if ev.summary_error is not None:
             why = dict(lc.detail.get("why", {}))
             why[COND_COUNTERS] = f"summary.json을 읽지 못했다({ev.summary_error})"

@@ -220,6 +220,7 @@ def test_fetch_records_stop_flag_from_sha_list(ctx, tmp_path):
     assert res.sha_ok and res.stop_requested
     pod_status = json.loads((tmp_path / "k6" / "pod-status.json").read_text())
     assert pod_status["stop_requested"] is True
+    assert load_evidence(tmp_path).k6_stop_requested  # 판정이 105를 인정하는 근거
 
 
 def test_fetch_retries_until_sha_matches(ctx, tmp_path):

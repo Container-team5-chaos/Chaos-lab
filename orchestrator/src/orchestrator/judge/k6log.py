@@ -104,6 +104,8 @@ COUNTER_INTENTS = "order_intents"  # 4.7 완전성 대조 Counter
 COUNTER_RESULTS = "order_results"
 _COUNTERS = ((TYPE_INTENT, COUNTER_INTENTS), (TYPE_RESULT, COUNTER_RESULTS))
 K6_OK_EXIT_CODES = frozenset({0, 99})  # 5.3. 99는 threshold 실패(abortOnFail 포함, 4.7)
+# SIGINT로 멈춘 k6(실측 2.3.0). 우리가 멈췄을 때(stopped)만 정상이다(4.8 STOP_REQUESTED)
+K6_STOPPED_EXIT_CODE = 105
 
 MAX_PROBLEMS_PER_CODE = 100  # 코드별 상한. 넘으면 "<code>: 그 밖 N건 생략" 한 줄
 GZIP_MAGIC = b"\x1f\x8b"
@@ -258,6 +260,8 @@ def log_complete(
     summary: Mapping[str, Any] | None,
     k6_exit_code: int | None,
     sha_ok: bool | None,
+    *,
+    stopped: bool = False,
 ) -> CheckResult:
     """기록 완전성(설계 5.3 log_complete).
 
@@ -269,7 +273,8 @@ def log_complete(
     - counters: intent·result 줄 수 ≥ summary의 order_intents·order_results.
       summary가 없으면(OOM 등) 실패다.
     - sha256: sha_ok가 True다. None은 미검증으로 실패다(sha_matches()로 구한다).
-    - k6_exit: 종료 코드가 0 또는 99다. None(모름)은 실패다.
+    - k6_exit: 종료 코드가 0 또는 99다. stopped(우리가 SIGINT로 멈춤)면 105도 정상이다.
+      None(모름)은 실패다.
 
     token·authorization 키와 intent 형식 위반은 이 결과에 들어가지 않는다(safety·classify 몫).
     결과: 완전하면 PASS, 아니면 INCONCLUSIVE + SENT_LOG_INCOMPLETE. value는 bool.
@@ -291,12 +296,13 @@ def log_complete(
         msg = "sha256 불일치" if sha_ok is False else "sha256 미검증"
         failing.setdefault(COND_SHA, []).append(msg)
 
-    if not _exit_ok(k6_exit_code):
-        msg = (
-            "k6 종료 코드 모름"
-            if k6_exit_code is None
-            else f"k6 종료 코드 {k6_exit_code!r}(0 또는 99여야 한다)"
-        )
+    if not _exit_ok(k6_exit_code, stopped):
+        if k6_exit_code is None:
+            msg = "k6 종료 코드 모름"
+        elif k6_exit_code == K6_STOPPED_EXIT_CODE:
+            msg = "k6 종료 코드 105(SIGINT)인데 정지 표시가 없다(의도하지 않은 중단)"
+        else:
+            msg = f"k6 종료 코드 {k6_exit_code!r}(0 또는 99여야 한다)"
         failing.setdefault(COND_EXIT, []).append(msg)
 
     failed = [c for c in LOG_COMPLETE_CONDITIONS if c in failing]
@@ -306,6 +312,7 @@ def log_complete(
         "why": {c: "; ".join(failing[c]) for c in failed},
         **cdetail,
         "k6_exit_code": k6_exit_code if _plain_int(k6_exit_code) else None,
+        "stopped_by_judge": stopped,
         "sha_ok": sha_ok if isinstance(sha_ok, bool) else None,
         "problems": counts,
     }
@@ -1081,8 +1088,10 @@ def _counter_check(
     return detail, probs
 
 
-def _exit_ok(code: Any) -> bool:
-    return _plain_int(code) and code in K6_OK_EXIT_CODES
+def _exit_ok(code: Any, stopped: bool = False) -> bool:
+    if not _plain_int(code):
+        return False
+    return code in K6_OK_EXIT_CODES or (stopped and code == K6_STOPPED_EXIT_CODE)
 
 
 def _norm_sha(s: str | None) -> str | None:

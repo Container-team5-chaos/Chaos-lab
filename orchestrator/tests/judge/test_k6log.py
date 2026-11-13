@@ -799,6 +799,17 @@ def test_log_complete_exit_codes(exit_code, ok):
     assert res.detail["failed"] == ([] if ok else [COND_EXIT])
 
 
+@pytest.mark.parametrize(
+    "exit_code, stopped, ok",
+    [(105, True, True), (105, False, False), (0, True, True), (137, True, False)],
+)
+def test_log_complete_accepts_105_only_when_we_stopped(exit_code, stopped, ok):
+    res = log_complete(parse_k6log(OK), summary(), exit_code, True, stopped=stopped)
+    assert res.value is ok and res.detail["stopped_by_judge"] is stopped
+    if exit_code == 105 and not ok:
+        assert "정지 표시가 없다" in res.detail["why"][COND_EXIT]
+
+
 @pytest.mark.parametrize("sha_ok, why", [(False, "불일치"), (None, "미검증")])
 def test_log_complete_sha_flag(sha_ok, why):
     res = complete(parse_k6log(OK), sha_ok=sha_ok)
