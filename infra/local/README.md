@@ -26,9 +26,44 @@
 ## 사용법
 
 ```bash
-infra/local/up.sh      # 생성 (여러 번 실행 가능)
-infra/local/down.sh    # 삭제
+infra/local/up.sh              # 인프라만 생성, 시세는 stub (여러 번 실행 가능)
+infra/local/up.sh --with-apps  # 인프라 + 수집기·주문 서비스·데모 화면, 시세는 실제 수집기
+infra/local/down.sh            # 삭제
 ```
+
+`--with-apps`는 아래를 차례로 배포하고, 끝에 시세가 5초 이내로 갱신되는지 확인한다.
+
+| 순서 | 대상 | 방법 |
+| --- | --- | --- |
+| 1 | 수집기 (C) | 이미지 빌드 → kind 로드 → `infra/k8s/collector/` 적용 |
+| 2 | 주문 서비스 (D) | `workloads/order/deploy-local.sh` 그대로 호출 |
+| 3 | 데모 화면 (E) | `web/deploy-local.sh`가 있을 때만 |
+
+| 환경 변수 | 기본값 | 의미 |
+| --- | --- | --- |
+| `PRICE_STUB` | 인프라만 `1`, `--with-apps` `0` | `1`이면 시세 stub도 띄움. 수집기 시세가 들어오면 stub은 스스로 멈춤 |
+| `ORDER_MODE` | 없음 | `baseline`이면 주문 서비스를 개선 전 설정으로 배포 |
+| `LITE` | `0` | `1`이면 Prometheus·Grafana·Chaos Mesh·metrics-server를 설치하지 않음. 앱 동작만 확인할 때 |
+
+- 수집기는 업비트에 접속해야 한다. 인터넷이 막힌 곳에서는 `PRICE_STUB=1 infra/local/up.sh --with-apps`로 실행한다.
+- B의 판정기는 `ticks` 테이블로 체결가의 신선함을 확인한다. stub만 쓰면 `ticks`가 비어 이 항목이 판정 불가(NOT_EVALUATED)가 된다. 판정까지 확인하려면 `--with-apps`로 실제 수집기를 띄운다.
+- 이미지 3개를 빌드하므로 처음 실행은 몇 분 더 걸린다. 앱 코드를 바꾼 뒤 다시 실행하면 새 이미지로 재시작한다.
+
+### 자원이 부족할 때 (LITE)
+
+```bash
+LITE=1 infra/local/up.sh --with-apps      # 앱만 띄우기
+LITE=1 infra/local/check-apps.sh          # 띄우고 확인까지
+```
+
+- 가장 무거운 Prometheus·Grafana(약 2GB)와 Chaos Mesh를 설치하지 않는다. 주문 서비스 차트가 쓰는 ServiceMonitor CRD만 등록한다(Pod 없음).
+- 장애 주입, 지표 수집, HPA 자동 확장은 되지 않는다. 화면·주문·수집기 동작 확인용이다.
+- 나중에 `LITE` 없이 다시 실행하면 빠진 구성 요소가 추가 설치된다.
+
+### 앱 검증 (`check-apps.sh`)
+
+`up.sh --with-apps`를 실행하고 Pod, 시세·`ticks`, 화면(nginx)·`/api`·`/ws`, 주문·재전송, 시세 끊김 시 `stale_price`, smoke-test를 차례로 확인한다.
+결과는 `~/chaos-test/<시각>/result.txt`. 이미 띄운 클러스터에서 확인만 할 때는 `SKIP_UP=1`.
 
 - `up.sh`: 끝에 접속 주소와 port-forward 명령 출력
 - 모든 kubectl/helm 호출은 `kind-chaos-lab` context를 명시하므로 다른 클러스터를 건드리지 않음
@@ -37,7 +72,7 @@ infra/local/down.sh    # 삭제
 ## 접속
 
 수집기 코드와 배포 절차는 [workloads/collector](../../workloads/collector/README.md)에 있다.
-`up.sh`로 인프라를 준비한 뒤 수집기 이미지를 kind에 로드하고 `infra/k8s/collector/`를 별도로 적용한다.
+`up.sh --with-apps`가 같은 절차로 배포한다. 수집기만 따로 다시 배포할 때는 README의 명령을 쓴다.
 수집기는 기존 `exchange` namespace, `postgres` Secret, PostgreSQL/Redis 서비스를 재사용한다.
 
 | 대상 | 클러스터 내부 주소 | 내 PC에서 열기 |
@@ -47,6 +82,8 @@ infra/local/down.sh    # 삭제
 | Prometheus | `kps-kube-prometheus-stack-prometheus.monitoring.svc:9090` | `kubectl --context kind-chaos-lab -n monitoring port-forward svc/kps-kube-prometheus-stack-prometheus 9090` |
 | Grafana | - | `kubectl --context kind-chaos-lab -n monitoring port-forward svc/kps-grafana 3000:80` (admin / admin) |
 | Chaos Dashboard | - | `kubectl --context kind-chaos-lab -n chaos-mesh port-forward svc/chaos-dashboard 2333` |
+| 주문 API (`--with-apps`) | `order.exchange.svc.cluster.local:8000` | `kubectl --context kind-chaos-lab -n exchange port-forward svc/order 8000` |
+| 데모 화면 (`--with-apps`) | `web.exchange.svc.cluster.local:80` | `kubectl --context kind-chaos-lab -n exchange port-forward svc/web 8080:80` |
 
 ## 다른 역할이 알아야 할 것
 
@@ -83,4 +120,6 @@ Grafana `admin/admin`, DB `exchange/exchange`, Chaos Dashboard 인증 없음. �
 | control-plane 컴포넌트가 계속 재시작 | CPU 부족. Docker CPU를 늘리거나 노드 수를 줄인다(현재가 줄인 버전입니다.) |
 | `chaos-daemon` 이 Ready가 안 됨 | values의 `chaosDaemon.runtime: containerd`, `socketPath: /run/containerd/containerd.sock` 확인 |
 | HPA `TARGETS`가 `<unknown>` | metrics-server 확인: `kubectl --context kind-chaos-lab top pods -n exchange`. 설치 직후 1분 정도는 지표가 없을 수 있음 |
+| `60초 동안 신선한 시세가 없습니다` | `kubectl --context kind-chaos-lab -n exchange logs deploy/collector -c collector`. 업비트 접속이 안 되면 `PRICE_STUB=1`로 다시 실행 |
+| `ticks에 최근 30초 시세가 없습니다` 경고 | `kubectl --context kind-chaos-lab -n exchange logs deploy/collector -c collector`로 DB 저장 오류 확인. 실험은 되지만 B의 fresh 판정은 NOT_EVALUATED |
 | 처음부터 다시 | `infra/local/down.sh` 후 `infra/local/up.sh` |
