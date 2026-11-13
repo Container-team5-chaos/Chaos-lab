@@ -1,6 +1,10 @@
 """ChaosMeshInjector 단위 테스트 (클러스터 없이 가짜 Kubernetes API로 검증)."""
 
+import copy
+from pathlib import Path
+
 import pytest
+import yaml
 
 from orchestrator.cleanup import recover, safe_cleanup
 from orchestrator.inject import (
@@ -8,6 +12,7 @@ from orchestrator.inject import (
     PROTECTED_LABEL,
     ChaosMeshInjector,
     CleanupIncomplete,
+    check_fault,
     with_safety_selector,
 )
 from orchestrator.store import StateStore
@@ -265,3 +270,128 @@ def test_incomplete_cleanup_is_recorded_and_next_recover_retries(tmp_path):
     )  # 이미 사라졌으므로 이번에 지운 목록은 비어 있어도 OK
     assert injector.leftovers() == []
     assert api.objects == {}
+
+
+# --- NetworkChaos: target 보호, 범위 검사, 시나리오 파일 ----------------------------
+
+SCENARIOS = Path(__file__).resolve().parents[2] / "experiments" / "scenarios"
+
+NET_FAULT = {
+    "kind": "NetworkChaos",
+    "spec": {
+        "action": "delay",
+        "mode": "all",
+        "selector": {
+            "namespaces": ["exchange"],
+            "labelSelectors": {"app": "mock-broker"},
+        },
+        "direction": "to",
+        "target": {
+            "mode": "all",
+            "selector": {
+                "namespaces": ["exchange"],
+                "labelSelectors": {"app": "adapter"},
+            },
+        },
+        "delay": {"latency": "2s"},
+    },
+}
+
+
+def target_keys(spec):
+    return [e["key"] for e in spec["target"]["selector"]["expressionSelectors"]]
+
+
+def test_safety_selector_also_protects_network_target():
+    """NetworkChaos의 상대편(target)에서도 보호 Pod·k6 Pod는 빠진다."""
+    spec = with_safety_selector(NET_FAULT["spec"])
+    assert PROTECTED_LABEL in expr_keys(spec)
+    assert PROTECTED_LABEL in target_keys(spec)
+    assert "app.kubernetes.io/name" in target_keys(spec)
+    assert spec["target"]["selector"]["labelSelectors"] == {"app": "adapter"}
+    assert "expressionSelectors" not in NET_FAULT["spec"]["target"]["selector"]
+    assert with_safety_selector(spec) == spec  # 멱등
+
+
+def test_safety_selector_does_not_invent_target():
+    """target이 없는 spec(PodChaos 등)에 target을 만들지 않는다."""
+    assert "target" not in with_safety_selector(FAULT["spec"])
+
+
+def test_check_fault_accepts_pod_and_network_faults():
+    check_fault(FAULT)
+    check_fault(NET_FAULT)
+    external = {
+        "kind": "NetworkChaos",
+        "spec": {
+            "action": "delay",
+            "selector": {"namespaces": ["exchange"]},
+            "direction": "to",
+            "externalTargets": ["api.upbit.com"],
+        },
+    }
+    check_fault(external)
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        (lambda f: f.update(kind="StressChaos"), "지원하지 않는"),
+        (lambda f: f["spec"]["selector"].pop("namespaces"), "namespaces"),
+        (lambda f: f["spec"].pop("direction"), "direction"),
+        (lambda f: f["spec"].pop("target"), "target"),
+        (
+            lambda f: f["spec"]["target"]["selector"].pop("namespaces"),
+            "target.selector",
+        ),
+    ],
+)
+def test_check_fault_rejects_unsafe_scope(change, message):
+    """범위가 넓어질 수 있는 spec은 거부한다."""
+    fault = copy.deepcopy(NET_FAULT)
+    change(fault)
+    with pytest.raises(ValueError, match=message):
+        check_fault(fault)
+
+
+def test_apply_rejects_unsafe_fault_without_creating():
+    """검사에 걸리면 Chaos 리소스를 하나도 만들지 않는다."""
+    api = FakeApi()
+    injector, _ = make(api)
+    fault = copy.deepcopy(NET_FAULT)
+    fault["spec"].pop("target")
+    with pytest.raises(ValueError):
+        injector.apply("run-net", 0, fault)
+    assert api.create_calls == 0
+
+
+def test_apply_network_fault_sends_safety_on_both_sides():
+    api = FakeApi()
+    injector, _ = make(api)
+    name = injector.apply("run-net", 0, NET_FAULT)
+    body = api.objects[("networkchaos", name)]["body"]
+    assert body["kind"] == "NetworkChaos"
+    assert body["metadata"]["labels"] == {LABEL_KEY: "run-net"}
+    assert PROTECTED_LABEL in expr_keys(body["spec"])
+    assert PROTECTED_LABEL in target_keys(body["spec"])
+
+
+@pytest.mark.parametrize("path", sorted(SCENARIOS.glob("*.yaml")), ids=lambda p: p.name)
+def test_scenario_files_pass_fault_check(path):
+    """experiments/scenarios의 모든 장애가 주입 전 검사를 통과한다."""
+    scenario = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert scenario["faults"], "faults가 비어 있음"
+    for fault in scenario["faults"]:
+        check_fault(fault)
+
+
+@pytest.mark.parametrize("name", ["broker-delay", "broker-partition"])
+def test_broker_scenarios_hit_only_broker_to_adapter(name):
+    """증권사 장애는 mock-broker → adapter 방향만 건드린다 (DB 등 다른 통신은 그대로)."""
+    scenario = yaml.safe_load((SCENARIOS / f"{name}.yaml").read_text(encoding="utf-8"))
+    (fault,) = scenario["faults"]
+    spec = fault["spec"]
+    assert fault["kind"] == "NetworkChaos"
+    assert spec["selector"]["labelSelectors"] == {"app": "mock-broker"}
+    assert spec["direction"] == "to"
+    assert spec["target"]["selector"]["labelSelectors"] == {"app": "adapter"}

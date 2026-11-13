@@ -194,3 +194,58 @@ def test_cleanup_on_kind_waits_and_is_idempotent(env):
     )["items"]
     assert left == []  # Terminating 상태로도 남아 있지 않음
     assert injector.cleanup(run_id) == []  # 멱등
+
+
+def network_delay(ns: str) -> dict:
+    # app=target Pod끼리 지연. 실제 시나리오(broker-delay)와 같은 모양: selector + direction + target
+    return {
+        "kind": "NetworkChaos",
+        "spec": {
+            "action": "delay",
+            "mode": "all",
+            "selector": {"namespaces": [ns], "labelSelectors": {"app": "target"}},
+            "direction": "to",
+            "target": {
+                "mode": "all",
+                "selector": {"namespaces": [ns], "labelSelectors": {"app": "target"}},
+            },
+            "delay": {"latency": "100ms"},
+        },
+    }
+
+
+def test_network_chaos_on_kind_is_accepted_and_cleaned(env):
+    """NetworkChaos spec을 Chaos Mesh가 받아들이고(webhook 검증 통과), 보호 Pod는 대상에서 빠지며, 정리된다."""
+    ns, core, custom, injector = env
+    run_id = f"n-{ns}"
+    name = injector.apply(run_id, 0, network_delay(ns))
+
+    def records():
+        obj = custom.get_namespaced_custom_object(
+            "chaos-mesh.org", "v1alpha1", ns, "networkchaos", name
+        )
+        return (obj.get("status") or {}).get("experiment", {}).get(
+            "containerRecords"
+        ) or []
+
+    assert wait_until(
+        lambda: len(records()) > 0, INJECT_TIMEOUT
+    ), "주입 기록이 생기지 않음"
+    protected = {
+        p.metadata.name
+        for p in core.list_namespaced_pod(
+            ns, label_selector=f"{PROTECTED_LABEL}=true"
+        ).items
+    }
+    injected = {r.get("id", "").split("/")[-1] for r in records()}
+    assert protected.isdisjoint(injected), f"protected Pod에 주입됨: {injected}"
+
+    assert injector.cleanup(run_id) == [name]
+    left = custom.list_namespaced_custom_object(
+        "chaos-mesh.org",
+        "v1alpha1",
+        ns,
+        "networkchaos",
+        label_selector=f"{LABEL_KEY}={run_id}",
+    )["items"]
+    assert left == []
