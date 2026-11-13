@@ -245,7 +245,24 @@ def test_fetch_without_log_leaves_no_file(ctx, tmp_path):
     assert len(res.errors) == F.FETCH_ATTEMPTS
     assert not (tmp_path / "k6" / "orders.jsonl.gz").exists()
     assert not (tmp_path / "k6" / "sha256sum.txt").exists()
-    assert load_evidence(tmp_path).log is None  # → SENT_LOG_MISSING
+    ev = load_evidence(tmp_path)
+    assert ev.log is None and ev.k6_exit_code == 0  # 처음이면 종료 코드는 남긴다
+
+
+def test_refetch_replaces_whole_folder(ctx, tmp_path):
+    fetch(ctx, FakeKubectl(), tmp_path)
+    fetch(ctx, FakeKubectl({"gzip summary.json": fail()}), tmp_path)
+    assert not (tmp_path / "k6" / "summary.json").exists()  # 1차 파일이 섞이지 않는다
+    assert not (tmp_path / "k6.partial").exists()
+
+
+def test_failed_refetch_keeps_previous_folder(ctx, tmp_path):
+    fetch(ctx, FakeKubectl(), tmp_path)
+    before = {p.name: p.read_bytes() for p in (tmp_path / "k6").iterdir()}
+    oom = ok(pod_doc(k6=done(137, "OOMKilled"), holder=RUNNING))
+    res = fetch(ctx, FakeKubectl({"gzip orders.jsonl": fail(), "pod": oom}), tmp_path)
+    assert not res.sha_ok and res.errors[-1].startswith("기록을 못 받아")
+    assert {p.name: p.read_bytes() for p in (tmp_path / "k6").iterdir()} == before
 
 
 def test_fetch_without_clock_skips_derived(ctx, tmp_path):

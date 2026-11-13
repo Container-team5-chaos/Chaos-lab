@@ -13,6 +13,7 @@
 4. `exec -c holder -- date -u +%s`를 RTT로 감싸 노드 시계 차이를 derived.json에 남긴다.
    실패하면 derived.json을 쓰지 않는다(시계 차이 모름).
 5. DB 수집 뒤 `exec -c holder -- touch /out/RELEASE`(release). fetch는 하지 않는다.
+받은 파일은 k6.partial/에 모아 k6/와 통째로 바꾼다. 다시 fetch해 기록을 못 받으면 기존 k6/를 둔다.
 
 fetch 전에 `kubectl delete job`을 하면 emptyDir와 함께 기록이 사라진다(설계 3).
 """
@@ -22,6 +23,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
+import shutil
 import subprocess
 import time
 import zlib
@@ -63,6 +65,7 @@ STOP_FLAG = "STOP_REQUESTED"
 
 # runs/<run_id>/ 아래 산출물(설계 5.2). evaluate(pipeline)가 이 이름으로 읽는다
 LOCAL_K6_DIR = "k6"
+PARTIAL_DIR = "k6.partial"
 POD_STATUS_NAME = "pod-status.json"  # {"pod", "containers", "stop_requested"}
 DERIVED_NAME = "derived.json"  # {"offset_ms", "rtt_ms"}(ClockOffset)
 REMOTE_SHA_NAME = "sha256sum.txt"  # 원격 `sha256sum /out/*` 출력 그대로(2단계)
@@ -291,9 +294,11 @@ def fetch(
     파일을 쓰지 않는다(evaluate가 SENT_LOG_MISSING 등으로 판단한다). RELEASE는 하지 않는다.
     """
     k6_dir = run_dir / LOCAL_K6_DIR
-    k6_dir.mkdir(parents=True, exist_ok=True)
     pod = find_pod(ctx, tr)
     status = wait_terminated(ctx, tr, pod, timeout_s=wait_timeout_s, sleep=sleep)
+    out = run_dir / PARTIAL_DIR  # 다른 fetch의 파일과 섞이지 않게 따로 모은다
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
 
     errors: list[str] = []
     got: tuple[str, dict[str, str], bytes, bytes] | None = None
@@ -315,8 +320,8 @@ def fetch(
     remote = {}
     if got is not None:  # 같은 시도의 sha256sum 출력과 기록을 함께 쓴다
         text, remote, gz, raw = got
-        (k6_dir / REMOTE_SHA_NAME).write_text(text, encoding="utf-8")
-        (k6_dir / LOCAL_ORDERS_GZ).write_bytes(gz)
+        (out / REMOTE_SHA_NAME).write_text(text, encoding="utf-8")
+        (out / LOCAL_ORDERS_GZ).write_bytes(gz)
         files[ORDERS_LOG] = sha256_bytes(raw)
         if SUMMARY in remote:
             try:
@@ -324,11 +329,11 @@ def fetch(
             except TransportError as e:
                 errors.append(f"{SUMMARY}: {e}")
             else:
-                (k6_dir / SUMMARY).write_bytes(summary)
+                (out / SUMMARY).write_bytes(summary)
                 files[SUMMARY] = sha256_bytes(summary)
     stop_requested = STOP_FLAG in remote  # sha256sum 목록에 있으면 정지 표시가 있다
     pod_doc = {"pod": pod, "containers": status.containers}
-    _write_json(k6_dir / POD_STATUS_NAME, {**pod_doc, "stop_requested": stop_requested})
+    _write_json(out / POD_STATUS_NAME, {**pod_doc, "stop_requested": stop_requested})
 
     clock: ClockOffset | None = None
     try:
@@ -337,9 +342,17 @@ def fetch(
         errors.append(f"시계: {e}")
     else:
         _write_json(
-            k6_dir / DERIVED_NAME,
+            out / DERIVED_NAME,
             {"offset_ms": clock.offset_ms, "rtt_ms": clock.rtt_ms},
         )
+
+    # 처음이거나 기록을 받았으면 통째로 바꾼다. 못 받은 재시도가 이전 증거를 지우지 않게 한다
+    if ORDERS_LOG in files or not k6_dir.exists():
+        shutil.rmtree(k6_dir, ignore_errors=True)
+        out.rename(k6_dir)
+    else:
+        shutil.rmtree(out)
+        errors.append("기록을 못 받아 기존 k6/를 그대로 둔다")
 
     return FetchResult(
         pod=pod,
