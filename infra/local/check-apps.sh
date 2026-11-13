@@ -98,7 +98,7 @@ k get pods -A -o wide > "$OUT/pods.txt" 2>&1
 
 # ---------------------------------------------------------------- 2. Pod
 step "2. 앱 Pod"
-for app in collector order dev-push web; do
+for app in collector order push-server web; do
   if k -n exchange wait --for=condition=Ready pod -l "app=$app" --timeout=60s >/dev/null 2>&1; then
     ok "$app Ready ($(k -n exchange get pods -l "app=$app" --no-headers 2>/dev/null | wc -l | tr -d ' ')개)"
   else

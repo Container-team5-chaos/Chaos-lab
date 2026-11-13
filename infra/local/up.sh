@@ -232,7 +232,7 @@ verify_apps() {
     warn "ticks에 최근 30초 시세가 없습니다. 수집기 로그를 확인하세요 (B의 fresh 판정은 NOT_EVALUATED가 됨)"
   fi
 
-  k -n exchange get pods -l 'app in (collector, order, web, dev-push)'
+  k -n exchange get pods -l 'app in (collector, order, web, push-server)'
 }
 
 summary() {

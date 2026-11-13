@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: push-server
+  namespace: exchange
+  labels:
+    release: kps
+spec:
+  selector:
+    matchLabels:
+      app: push-server
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 5s
