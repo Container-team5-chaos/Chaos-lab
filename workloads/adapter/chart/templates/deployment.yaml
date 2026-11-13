@@ -1,0 +1,74 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adapter
+  labels:
+    {{- include "adapter.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "adapter.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "adapter.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: init-adapter
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "adapter", "init-db"]
+          envFrom:
+            - secretRef:
+                name: {{ .Values.database.secretName }}
+          env:
+            {{- include "adapter.env" . | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {memory: 128Mi}
+      containers:
+        - name: adapter
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - {name: http, containerPort: {{ .Values.service.port }}}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.database.secretName }}
+          env:
+            - name: PORT
+              value: {{ .Values.service.port | quote }}
+            {{- include "adapter.env" . | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: tmp
+          emptyDir: {}
