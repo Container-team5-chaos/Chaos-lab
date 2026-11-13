@@ -159,11 +159,27 @@ def test_stop_sends_int_and_never_deletes():
     load.start(RUN_ID, {})
     load.stop(RUN_ID)
     load.stop(RUN_ID)
-    kills = [c for c in k.calls if c[-3:] == ["kill", "-INT", "1"]]
-    assert kills == [
-        ["--namespace", "exchange", "exec", POD, "-c", "k6", "--", "kill", "-INT", "1"]
+    stops = [c[2:] for c in k.calls if c[-1] in ("1", "/out/STOP_REQUESTED")]
+    # 표시 파일이 먼저, SIGINT가 나중(105를 우리가 멈춘 것으로 판정하게)
+    assert stops == [
+        ["exec", POD, "-c", "holder", "--", "touch", "/out/STOP_REQUESTED"],
+        ["exec", POD, "-c", "k6", "--", "kill", "-INT", "1"],
     ]
     assert not any("delete" in c for c in k.calls)
+
+
+def test_stop_still_signals_when_flag_fails():
+    k = FakeKubectl(jsonl=[INTENT])
+
+    def kubectl(args, stdin=None):
+        if args[-1] == "/out/STOP_REQUESTED":
+            raise RuntimeError("holder gone")
+        return k(args, stdin)
+
+    load = make(kubectl)
+    load.start(RUN_ID, {})
+    load.stop(RUN_ID)
+    assert k.calls[-1][-3:] == ["kill", "-INT", "1"]
 
 
 def test_stop_before_start_is_noop():

@@ -2,7 +2,8 @@
 
 runner가 WARMUP에서 start, RECOVERING·정리에서 stop을 부른다.
 - start: ConfigMap k6-scripts 갱신 → Job k6-<run_id> apply → 첫 intent 줄이 나올 때까지 대기
-- stop: k6 컨테이너 PID 1에 SIGINT만 보낸다. Job·Pod는 지우지 않는다(judge fetch 전 삭제 금지)
+- stop: holder에 /out/STOP_REQUESTED를 만든 뒤 k6 컨테이너 PID 1에 SIGINT를 보낸다.
+  Job·Pod는 지우지 않는다(judge fetch 전 삭제 금지)
 kubectl은 주입 가능한 runner로 부른다(테스트는 가짜 runner, 클러스터 없음).
 """
 
@@ -26,6 +27,8 @@ LOAD_DEFAULTS = {
     "start_timeout_s": 90,
 }
 SETUP_TIMEOUT_S, GRACEFUL_STOP_S, FETCH_BUDGET_S = 180, 60, 600  # 설계 4.8
+# SIGINT로 멈춘 k6는 종료 코드 105다. judge fetch가 이 파일을 보고 우리가 멈춘 것으로 기록한다
+STOP_FLAG = "/out/STOP_REQUESTED"
 ANTI_AFFINITY = (
     "{podAntiAffinity: {preferredDuringSchedulingIgnoredDuringExecution: [{weight: 100,"
     " podAffinityTerm: {labelSelector: {matchLabels: {app.kubernetes.io/name: order}},"
@@ -199,13 +202,21 @@ class K6JobLoad:
             self._sleep(self.poll_s)
 
     def stop(self, run_id: str) -> None:
-        """k6에 SIGINT(judge stop과 같다). Job·Pod는 지우지 않는다. 두 번·start 실패 후에도 안전."""
+        """표시 파일 → k6에 SIGINT(judge stop과 같다). 두 번·start 실패 후에도 안전.
+
+        표시를 먼저 만들어야 "105인데 표시 없음"(의도하지 않은 중단으로 보임)이 생기지 않는다.
+        Job·Pod는 지우지 않는다.
+        """
         if run_id in self._stopped:
             return
         job = f"k6-{run_id}"
         try:
             pod = self._pod(job)
             if pod:
+                try:
+                    self._k("exec", pod, "-c", "holder", "--", "touch", STOP_FLAG)
+                except RuntimeError:
+                    pass  # holder가 없으면 표시 없이 멈춘다(판정은 기록 불완전으로 본다)
                 self._k("exec", pod, "-c", "k6", "--", "kill", "-INT", "1")
         except RuntimeError:
             pass  # k6가 이미 끝났거나 Job이 없다. 정리 경로라 삼킨다
