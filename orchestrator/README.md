@@ -36,7 +36,32 @@ PRECHECK → WARMUP → INJECTING → OBSERVING → RECOVERING → JUDGING → D
 - **5-a 관측 소실**: WARMUP·OBSERVING·RECOVERING 동안 5초마다 Prometheus `/-/ready` 확인.
   정상 응답이 15초 넘게 없으면 장애·부하를 멈추고 판정 없이 `INCONCLUSIVE (observability_lost)`.
 - **5-b 오케스트레이터 재시작**: Job이 같은 `RUN_ID`로 대체 Pod를 띄우면, state.json을 보고
-  주입 없이 정리한 뒤 `ABORTED (orchestrator_restart)`로 끝난다. 새 실험은 시작하지 않는다.
+  k6에 멈춤 신호(SIGINT)를 보내고 Chaos 리소스를 지운 뒤 `ABORTED (orchestrator_restart)`로 끝난다.
+  새 주입·새 부하는 만들지 않는다. k6 멈춤 성공 여부는 `load_stopped`에 남는다.
+
+## 시나리오 6: 대기열이 쌓였다 빠지는가
+
+시나리오 YAML에 `drain` 블록이 있으면 adapter 대기열(`adapter_queue_depth`)을 지켜본다.
+
+```yaml
+drain:
+  query: sum(adapter_queue_depth)   # 기본값
+  timeout_s: 300                    # 장애 해제 후 이 시간 안에 빠져야 한다
+  threshold: 0                      # 최소 기준선
+```
+
+- WARMUP 동안의 최대값을 평소 수준으로 잡는다(부하 중에는 정상이어도 pending이 몇 건 있다).
+- 장애 중 최대값(`drain.peak`)을 기록하고, 회복 단계에서 부하를 유지한 채 평소 수준 이하로 내려올 때까지 기다린다.
+- 결과 반영 (`drain_outcome`)
+
+| drain_outcome | 상황 | result |
+|---|---|---|
+| drained | 기한 안에 평소 수준으로 내려옴 | 판정기 결과 유지 |
+| queue_not_drained | 기한 안에 안 내려옴 | FAILED |
+| queue_not_built | 장애 중 대기열이 평소 수준을 넘은 적 없음(장애 효과 없음) | INCONCLUSIVE |
+| drain_unobserved | 지표를 읽지 못함(빈 값은 0이 아니라 '모름') | INCONCLUSIVE |
+
+- 빠진 시각은 run.json `marks.queue_drained`에 남는다.
 
 ## 시작 게이트
 

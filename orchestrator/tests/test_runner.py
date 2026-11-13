@@ -365,3 +365,162 @@ def test_criteria_path_is_absolute_from_scenario(tmp_path):
     assert run["criteria"] == str(
         tmp_path / "experiments" / "criteria" / "default.yaml"
     )
+
+
+# ---- 5-b: 재시작 시 k6도 멈춘다 -------------------------------------------
+def test_restart_stops_k6_load(tmp_path):
+    """재시작 후 정리 대상은 Chaos와 k6 둘 다다(잔여 PodChaos·k6 0)."""
+    inj = MockInjector()
+    load = MockLoad()  # 클러스터의 k6 Job처럼 Pod가 죽어도 남는다
+    store = StateStore(tmp_path / "state.json")
+    clock = Clock()
+
+    def make_runner():
+        return Runner(
+            store,
+            inj,
+            load,
+            MockJudge(),
+            sleep=clock.sleep,
+            now=clock.now,
+            runs_dir=tmp_path / "runs",
+        )
+
+    first = make_runner()
+
+    def die(seconds):
+        if first.state.get("phase") == "OBSERVING":
+            raise Crash()
+        clock.sleep(seconds)
+
+    first.sleep = die
+    first._abort = lambda reason: None  # kill -9
+    with pytest.raises(Crash):
+        first.run(SCENARIO, run_id="r-k6")
+    assert "r-k6" in load.running
+
+    state = make_runner().run(SCENARIO, run_id="r-k6")  # Job 대체 Pod
+    assert state["result"] == "ABORTED" and state["load_stopped"] is True
+    assert load.running == set()
+    assert inj.resources == {}
+
+
+def test_recover_survives_load_stop_error(tmp_path):
+    class BrokenStop(MockLoad):
+        def stop(self, run_id):
+            raise RuntimeError("kubectl down")
+
+    store = StateStore(tmp_path / "state.json")
+    store.save({"run_id": "r-x", "phase": "OBSERVING", "history": []})
+    inj = MockInjector()
+    inj.apply("r-x", 0, {})
+    state = recover(store, inj, load=BrokenStop())
+    assert state["result"] == "ABORTED"
+    assert state["load_stopped"] is False
+    assert state["cleanup"] == "OK" and inj.resources == {}  # Chaos 정리는 계속한다
+
+
+# ---- 시나리오 6: 대기열이 쌓였다 빠지는가 ------------------------------------
+class QueueMetric:
+    """phase별로 대기열 값을 돌려주는 가짜 Prometheus. 회복 단계에서는 drain_after번째 조회부터 base."""
+
+    def __init__(self, runner, base=2, fault=40, drain_after=3, unknown=False):
+        self.runner, self.base, self.fault = runner, base, fault
+        self.drain_after, self.unknown = drain_after, unknown
+        self.recover_calls = 0
+
+    def value(self, query):
+        assert query == "sum(adapter_queue_depth)"
+        phase = self.runner.state.get("phase")
+        if self.unknown and phase != "WARMUP":
+            return None
+        if phase == "WARMUP":
+            return self.base
+        if phase in ("INJECTING", "OBSERVING"):
+            return self.fault
+        self.recover_calls += 1
+        return self.base if self.recover_calls > self.drain_after else self.fault
+
+
+DRAIN_SCENARIO = {
+    **SCENARIO,
+    "durations": {"warmup": 10, "observe": 20, "recover": 0},
+    "drain": {"timeout_s": 60},
+}
+
+
+def _drain_runner(tmp_path, judge=None, **metric_kw):
+    _, inj, runner = make(tmp_path, judge=judge)
+    runner.metrics = QueueMetric(runner, **metric_kw)
+    return inj, runner
+
+
+def test_queue_builds_and_drains_passes(tmp_path):
+    _, runner = _drain_runner(tmp_path)
+    state = runner.run(DRAIN_SCENARIO, run_id="r-q1")
+    d = state["drain"]
+    assert state["result"] == "PASSED" and state["drain_outcome"] == "drained"
+    assert d["baseline_peak"] == 2 and d["peak"] == 40
+    assert d["drained"] is True and d["drain_s"] > 0
+    run = json.loads((tmp_path / "runs" / "r-q1" / "run.json").read_text())
+    assert run["marks"]["inject_end"] <= run["marks"]["queue_drained"]
+
+
+def test_queue_not_drained_in_time_fails(tmp_path):
+    inj, runner = _drain_runner(tmp_path, drain_after=10_000)
+    state = runner.run(DRAIN_SCENARIO, run_id="r-q2")
+    assert state["result"] == "FAILED"
+    assert state["drain_outcome"] == "queue_not_drained"
+    assert state["drain"]["drained"] is False
+    assert inj.resources == {}  # 실패여도 장애는 정리됐다
+
+
+def test_queue_never_built_is_inconclusive(tmp_path):
+    _, runner = _drain_runner(tmp_path, fault=2)  # 장애가 효과 없음
+    state = runner.run(DRAIN_SCENARIO, run_id="r-q3")
+    assert state["result"] == "INCONCLUSIVE"
+    assert state["drain_outcome"] == "queue_not_built"
+
+
+def test_queue_unobservable_is_inconclusive(tmp_path):
+    _, runner = _drain_runner(tmp_path, unknown=True)  # 지표가 비면 0이 아니라 모름
+    state = runner.run(DRAIN_SCENARIO, run_id="r-q4")
+    assert state["result"] == "INCONCLUSIVE"
+    assert state["drain_outcome"] == "drain_unobserved"
+
+
+def test_judge_fail_is_kept_even_if_drained(tmp_path):
+    _, runner = _drain_runner(tmp_path, judge=MockJudge(FAIL))
+    assert runner.run(DRAIN_SCENARIO, run_id="r-q5")["result"] == "FAILED"
+
+
+def test_bad_drain_block_rejected_before_start(tmp_path):
+    _, inj, runner = make(tmp_path)
+    with pytest.raises(ValueError):
+        runner.run({**SCENARIO, "drain": {"timeout": 60}}, run_id="r-q6")
+    assert inj.create_calls == 0
+
+
+def test_prom_query_parses_and_fails_closed(monkeypatch):
+    import io
+
+    from orchestrator import metrics
+
+    def fake(body):
+        def _open(url, timeout):
+            return io.BytesIO(json.dumps(body).encode())
+
+        return _open
+
+    ok = {"status": "success", "data": {"result": [{"value": [0, "12"]}]}}
+    monkeypatch.setattr(metrics.urllib.request, "urlopen", fake(ok))
+    assert metrics.PromQuery("http://p").value("q") == 12.0
+    empty = {"status": "success", "data": {"result": []}}
+    monkeypatch.setattr(metrics.urllib.request, "urlopen", fake(empty))
+    assert metrics.PromQuery("http://p").value("q") is None
+
+    def boom(url, timeout):
+        raise OSError("down")
+
+    monkeypatch.setattr(metrics.urllib.request, "urlopen", boom)
+    assert metrics.PromQuery("http://p").value("q") is None

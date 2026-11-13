@@ -17,10 +17,12 @@ import time
 import uuid
 from enum import Enum
 
+from . import drain
 from .cleanup import TERMINAL, recover, safe_cleanup
 from .gates import AlwaysOpen, Gate
 from .inject import Injector
 from .judging import FAIL, PASS, Judge
+from .metrics import Metrics, NoMetrics
 from .observe import LoadGenerator
 from .runjson import RunFile, check_run_id
 from .store import StateStore
@@ -55,6 +57,7 @@ class Runner:
         runs_dir: str = "runs",
         poll_s: float = 5.0,
         lost_after_s: float = 15.0,
+        metrics: Metrics | None = None,
     ):
         self.store = store
         self.injector = injector
@@ -67,6 +70,8 @@ class Runner:
         self.runs_dir = runs_dir
         self.poll_s = poll_s
         self.lost_after_s = lost_after_s
+        self.metrics = metrics or NoMetrics()
+        self._drain: dict | None = None  # 시나리오 drain 설정(없으면 None)
         self.state: dict = {}
 
     # --- 상태 기록 -------------------------------------------------------
@@ -86,6 +91,7 @@ class Runner:
         end = self.now() + seconds
         last_ok = self.now()
         while True:
+            self._sample_queue()
             if self.watch.healthy():
                 last_ok = self.now()
             elif self.now() - last_ok >= self.lost_after_s:
@@ -94,6 +100,36 @@ class Runner:
             if remaining <= 0:
                 return
             self.sleep(min(self.poll_s, remaining))
+
+    # --- 시나리오 6: 대기열 -------------------------------------------
+    def _sample_queue(self) -> None:
+        if self._drain is None:
+            return
+        baseline = self.state.get("phase") == Phase.WARMUP.value
+        drain.sample(
+            self.state["drain"],
+            self.metrics.value(self._drain["query"]),
+            baseline=baseline,
+        )
+
+    def _wait_drained(self, run_file: RunFile) -> None:
+        """장애 해제 후 대기열이 threshold 이하로 내려올 때까지 기다린다(기한 timeout_s)."""
+        rec = self.state["drain"]
+        start = self.now()
+        deadline = start + self._drain["timeout_s"]
+        while True:
+            value = self.metrics.value(self._drain["query"])
+            drain.sample(rec, value)
+            rec["last_unknown"] = value is None
+            if value is not None and value <= drain.level(rec):
+                rec.update(drained=True, drain_s=self.now() - start)
+                run_file.mark("queue_drained")
+                break
+            if self.now() >= deadline:
+                rec.update(drained=False, drain_s=None)
+                break
+            self.sleep(min(self.poll_s, deadline - self.now()))
+        self.store.save(self.state)
 
     def _stop_everything(self) -> tuple[str, list[str], str]:
         status, removed, err = safe_cleanup(self.injector, self.state["run_id"])
@@ -111,12 +147,13 @@ class Runner:
         run_id = check_run_id(run_id or f"r-{uuid.uuid4().hex[:8]}")
 
         # 1) 이전 실험이 끊겼으면 주입 없이 정리만 하고 끝난 것으로 기록
-        recovered = recover(self.store, self.injector, now=self.now)
+        recovered = recover(self.store, self.injector, now=self.now, load=self.load)
         # Job이 같은 RUN_ID로 대체 Pod를 띄운 경우: 정리만 하고 새 실험은 시작하지 않는다
         last = recovered or self.store.load()
         if last and last.get("run_id") == run_id and last.get("phase") in TERMINAL:
             return last
         durations = scenario.get("durations", {})
+        self._drain = drain.settings(scenario)
 
         # 2) 시작 게이트: 이전 run 기록을 덮어쓰기 전에 확인한다
         gate = self.gate.check(scenario)
@@ -139,6 +176,8 @@ class Runner:
             "run_json": str(run_file.path),
             "gate": gate.checks,
         }
+        if self._drain is not None:
+            self.state["drain"] = drain.new_record(self._drain)
         try:
             self._enter(Phase.PRECHECK)
 
@@ -165,17 +204,28 @@ class Runner:
             if err:
                 self.state["cleanup_error"] = err
             self._observe(durations.get("recover", 0))
+            if self._drain is not None:
+                self._wait_drained(run_file)  # 부하는 유지한 채로 빠지는지 본다
             self.load.stop(run_id)
 
             self._enter(Phase.JUDGING)
             verdict = self.judge.evaluate(run_file.path, run_id)
             result = OUTCOME_TO_RESULT.get(verdict.outcome, "INCONCLUSIVE")
+            extra = {}
+            if self._drain is not None:
+                lower, why = drain.outcome(self.state["drain"])
+                extra["drain_outcome"] = why
+                if lower == "FAILED" and result != "FAILED":
+                    result = "FAILED"
+                elif lower == "INCONCLUSIVE" and result == "PASSED":
+                    result = "INCONCLUSIVE"
             if self.state["cleanup"] != "OK":
                 result = "INCONCLUSIVE"  # 장애가 남아 있을 수 있으면 통과로 보지 않는다
             return self._finish(
                 Phase.DONE,
                 result,
                 verdict={"outcome": verdict.outcome, "details": verdict.details},
+                **extra,
             )
 
         except ObservabilityLost as e:
