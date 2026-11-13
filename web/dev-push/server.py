@@ -31,12 +31,16 @@ state = {"redis_ok": False}
 
 
 def to_message(raw) -> str | None:
-    """Redis 값({"price", "ts"})을 브라우저용 메시지로 바꾼다. 형식이 틀리면 None."""
+    """Redis 값({"price", "ts"})을 브라우저용 메시지로 바꾼다. 형식이 틀리면 None.
+
+    시세 stub이 쓴 값에는 "source": "stub"이 있어 그대로 넘긴다 → 화면이 가상 시세임을 표시.
+    """
     try:
         data = json.loads(raw)
-        return json.dumps(
-            {"market": MARKET, "price": str(data["price"]), "ts": int(data["ts"])}
-        )
+        msg = {"market": MARKET, "price": str(data["price"]), "ts": int(data["ts"])}
+        if data.get("source") == "stub":
+            msg["source"] = "stub"
+        return json.dumps(msg)
     except (ValueError, KeyError, TypeError):
         LOG.warning("형식이 맞지 않는 시세 무시: %r", raw)
         return None

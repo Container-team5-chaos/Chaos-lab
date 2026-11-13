@@ -64,6 +64,12 @@
   .ticker.is-stale { border-left-color: var(--warn); background: var(--warn-bg); }
   .ticker-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 18px; }
   .market { font-size: 15px; color: var(--muted); }
+  /* 테스트용 가상 시세(stub)일 때: 진짜 시세로 오해하지 않게 눈에 띄게 표시 */
+  .source-badge {
+    font-size: 13px; font-weight: 600; color: #6B3FA0; background: #F1EAFB;
+    border: 1px dashed #6B3FA0; border-radius: 999px; padding: 1px 10px;
+  }
+  .source-badge[hidden] { display: none; }
   .price { font-size: clamp(38px, 7vw, 60px); font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; }
   .price .unit { font-size: 0.38em; font-weight: 500; color: var(--muted); margin-left: 6px; letter-spacing: 0; }
   .delta { font-size: 17px; font-weight: 600; }
@@ -153,6 +159,7 @@
   <div id="ticker" class="ticker" aria-live="polite">
     <div class="ticker-head">
       <span class="market">비트코인 KRW-BTC</span>
+      <span id="source-badge" class="source-badge" hidden>가상 시세 · 실제 업비트 시세 아님</span>
       <span id="delta" class="delta num"></span>
     </div>
     <div class="price num"><span id="price">-</span><span class="unit">원</span></div>
@@ -266,6 +273,7 @@ function connect() {
       retry = 0; state.wsUp = true;
       setLink("on", "시세 연결됨"); log("시세 연결됨");
     }
+    onSource(m.source === "stub" ? "stub" : "real");
     onPrice(m.price, Number(m.ts));
   };
   ws.onclose = () => {
@@ -282,6 +290,19 @@ function connect() {
 function setLink(kind, text) {
   $("ws-dot").className = "dot " + kind;
   $("ws-text").textContent = text;
+}
+
+/* 시세 출처: 시세 stub이 쓴 값이면 "source":"stub"이 붙어 온다 */
+function onSource(src) {
+  if (state.source === src) return;
+  const changed = state.source != null;
+  state.source = src;
+  $("source-badge").hidden = src !== "stub";
+  if (changed) {  // 출처가 바뀌면 가상·실제 시세가 한 차트에 섞이지 않게 처음부터
+    state.points = []; state.first = null;
+  }
+  if (src === "stub") log("가상 시세(stub)를 받는 중 — 실제 업비트 시세가 아니에요", true);
+  else if (changed) log("실제 시세로 바뀌었어요");
 }
 
 function onPrice(priceStr, ts) {
