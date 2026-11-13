@@ -750,12 +750,28 @@ def test_409_after_ack_counts_both():
 
 
 def _returned_dict_keys(path: Path, func: str) -> list[str]:
+    """func가 반환하는 dict 리터럴의 키. `return {...}`와 `x = {...}; return x` 둘 다 읽는다.
+
+    `x = {...}` 뒤에 조건부로 더하는 키(예: 외부 주문 모드의 execution_mode)는 기본 응답이 아니라 세지 않는다.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == func:
+            assigned = {
+                t.id: sub.value
+                for sub in ast.walk(node)
+                if isinstance(sub, ast.Assign) and isinstance(sub.value, ast.Dict)
+                for t in sub.targets
+                if isinstance(t, ast.Name)
+            }
             for sub in ast.walk(node):
-                if isinstance(sub, ast.Return) and isinstance(sub.value, ast.Dict):
-                    return [k.value for k in sub.value.keys]  # type: ignore[union-attr]
+                if not isinstance(sub, ast.Return):
+                    continue
+                value = sub.value
+                if isinstance(value, ast.Name):
+                    value = assigned.get(value.id)
+                if isinstance(value, ast.Dict):
+                    return [k.value for k in value.keys]  # type: ignore[union-attr]
     raise AssertionError(f"{path.name}:{func} 반환 dict를 찾지 못했다")
 
 
