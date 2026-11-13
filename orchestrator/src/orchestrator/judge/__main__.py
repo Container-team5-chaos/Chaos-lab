@@ -378,6 +378,10 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
     ctx = load_run(args.run)
     result = fetch_mod.fetch(ctx, _transports(), _run_dir(ctx))
     _print_json(result)
+    # 기록을 못 받았거나 원격과 다르다. Job을 지우지 않고 다시 돈다
+    if not result.sha_ok:
+        print(f"{PROG} fetch: 기록 회수 실패. 다시 fetch한다", file=sys.stderr)
+        return EXIT_JUDGE_ERROR
     return EXIT_PASS
 
 
