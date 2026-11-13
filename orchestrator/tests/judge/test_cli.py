@@ -170,8 +170,6 @@ def test_not_implemented_constant_is_distinct():
         ("plan", "설계 1.4"),
         ("accounts", "설계 3"),
         ("doctor", "설계 7.5"),
-        ("fetch", "설계 4.8"),
-        ("stop", "설계 4.8"),
         ("collect", "설계 5.2"),
         ("run", "설계 5.2"),
         ("precheck", "설계 1.4"),
