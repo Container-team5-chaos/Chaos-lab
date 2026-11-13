@@ -12,6 +12,7 @@ TAG="${TAG:-dev}"
 VALUES=()
 if [[ "${1:-}" == "baseline" ]]; then
   VALUES=(-f "$DIR/chart/values-baseline.yaml")
+  shift
 fi
 
 echo "==> 이미지 빌드: chaos-lab-order:$TAG"
@@ -22,7 +23,7 @@ kind load docker-image "chaos-lab-order:$TAG" --name "$CLUSTER_NAME"
 
 echo "==> Helm 배포 (namespace: exchange)"
 helm --kube-context "$CONTEXT" upgrade --install order "$DIR/chart" \
-  -n exchange --set image.tag="$TAG" "${VALUES[@]+"${VALUES[@]}"}" --wait --timeout 180s
+  -n exchange --set image.tag="$TAG" "${VALUES[@]+"${VALUES[@]}"}" "$@" --wait --timeout 180s
 
 # 같은 태그로 다시 배포해도 새 이미지를 쓰도록 Pod 재시작
 kubectl --context "$CONTEXT" -n exchange rollout restart deployment/order

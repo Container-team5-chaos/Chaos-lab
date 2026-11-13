@@ -1,0 +1,6 @@
+apiVersion: v2
+name: adapter
+description: 영속 대기열과 속도 제한을 가진 외부 증권사 주문 어댑터
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

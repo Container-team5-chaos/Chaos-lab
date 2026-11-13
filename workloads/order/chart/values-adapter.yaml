@@ -1,0 +1,4 @@
+# 주문 서비스 → adapter → mock-broker 연동 모드.
+# mock-broker는 workloads/adapter/API.md의 max_amount 계약을 지켜야 함.
+config:
+  adapterUrl: http://adapter.exchange.svc.cluster.local:8000
