@@ -233,10 +233,10 @@ class Evidence:
     remote_sha: str | None = None
     clock_offset_ms: int | None = None
     db: DbSnapshot | None = None
+    pod_obs: Mapping[str, Any] = field(default_factory=dict, hash=False)
     manifest: Mapping[str, str | None] = field(default_factory=dict, hash=False)
     summary_error: str | None = None
     summary_token_key: bool = False
-    pod_obs: Mapping[str, Any] = field(default_factory=dict, hash=False)
 
     @property
     def manifest_sha256(self) -> str:
@@ -378,10 +378,10 @@ def load_evidence(evidence: str | Path) -> Evidence:
         remote_sha=remote,
         clock_offset_ms=offset,
         db=db,
+        pod_obs=pod_obs,
         manifest=dict(sorted(manifest.items())),
         summary_error=summary_error,
         summary_token_key=summary_token,
-        pod_obs=pod_obs,
     )
 
 
