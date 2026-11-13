@@ -114,13 +114,15 @@ def pod_counts(
     """pod_replaced(장애 뒤 새로 뜬 Ready Pod)와 crash_restart(장애 중 비정상 종료) 수."""
     if inject_start is None:
         return {"note": "marks.inject_start가 없어 Pod 관측값을 만들지 않았다"}
+    # k8s 시각은 초 단위로 잘려서, 같은 초에 뜬 교체 Pod가 장애 전으로 보이지 않게 내린다
+    start_s = inject_start // 1000 * 1000
     created_by = None if within_ms is None else inject_start + within_ms
     replaced = crashed = 0
     for pod in items:
         status = pod["status"]
         created = _ms(pod["metadata"]["creationTimestamp"])
         if (
-            created > inject_start
+            created >= start_s
             and (created_by is None or created <= created_by)
             and _ready(status)
         ):
@@ -129,7 +131,7 @@ def pod_counts(
             term = c.get("lastState", {}).get("terminated")
             if term and term["exitCode"] != 0:
                 finished = _ms(term["finishedAt"])
-                if finished >= inject_start and (
+                if finished >= start_s and (
                     inject_end is None or finished <= inject_end
                 ):
                     crashed += 1

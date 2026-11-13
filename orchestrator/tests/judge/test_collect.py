@@ -195,6 +195,13 @@ def test_pod_query_failure_is_recorded(run):
     assert not (run_dir / "raw/k8s/pods.json").exists()
 
 
+def test_pod_counts_same_second_replacement():
+    # 실제 kind run에서 나온 경우: 05:53:57.606에 지웠고 교체 Pod 시각은 05:53:57Z다
+    pods = [_pod("new", T0 + 900), _pod("crash", T0 - 60_000, crash_at=T0 + 900)]
+    got = gather.pod_counts(pods, T0 + 606, T0 + 10_000)
+    assert got == {"pod_replaced": 1, "crash_restart": 1}
+
+
 def test_pod_counts_rules():
     start, end = T0, T0 + 30_000
     pods = [
