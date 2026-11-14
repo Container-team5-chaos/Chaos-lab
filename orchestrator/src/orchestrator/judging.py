@@ -76,8 +76,7 @@ def accept(exit_code: int, verdict: dict, run_json: Path, run_id: str) -> Verdic
 class ChaosJudge:
     """`python -m orchestrator.judge run --run runs/<id>/run.json` 실행 후 수용 조건 확인."""
 
-    # collect가 stub인 동안은 offline이 기본값(B 문서 5장)
-    def __init__(self, offline: bool = True):
+    def __init__(self, offline: bool = False):
         self.offline = offline
 
     def evaluate(self, run_json: Path, run_id: str) -> Verdict:

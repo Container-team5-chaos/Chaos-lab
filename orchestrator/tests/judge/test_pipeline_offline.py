@@ -24,6 +24,7 @@ import pytest
 
 import orchestrator.judge.__main__ as cli
 import orchestrator.judge.pipeline as pipeline_mod
+from orchestrator.judge import gather
 from orchestrator.judge import reasons as R
 from orchestrator.judge.client import phase_windows, phases_from_marks, run_window
 from orchestrator.judge.context import load_run
@@ -623,9 +624,17 @@ def test_judge_offline_api():
     assert v.verdict_digest == run_eval(FIXTURE).verdict_digest
 
 
-def test_collect_is_stub():
-    with pytest.raises(NotImplementedError, match="설계 5.2"):
-        judge(FIXTURE / "run.json")  # collect가 바로 멈춰 아무것도 쓰지 않는다
+def test_judge_online_collects_then_evaluates(monkeypatch):
+    seen = []
+
+    def fake_collect(ctx, crit, tr):  # 클러스터 대신 픽스처 폴더를 증거로 돌려준다
+        seen.append(ctx.run_id)
+        return FIXTURE
+
+    monkeypatch.setattr(gather, "collect", fake_collect)
+    v = judge(FIXTURE / "run.json")
+    assert seen == [RUN_ID]
+    assert v.verdict_digest == run_eval(FIXTURE).verdict_digest
 
 
 def test_assess_returns_classified_rows():
@@ -1051,6 +1060,24 @@ def test_fault_effect_observe_uses_obs(tmp_path):
     item = by_id(run_eval(seen, crit).guards)["crash_restart"]
     assert item.outcome is Outcome.PASS
     assert item.value == 1
+
+
+def test_fault_effect_observe_falls_back_to_collect_obs(tmp_path):
+    crit = write_criteria(
+        tmp_path,
+        "fault_effect: [{id: crash_restart, observe: crash_restart, target: order-api, min: 1}]\n",
+    )
+    run = fault_run(tmp_path / "a", start=T0 + 4000, end=T0 + 5000)
+    (run / "raw/k8s").mkdir()
+    (run / "raw/k8s/obs.json").write_text('{"crash_restart": 1}', encoding="utf-8")
+    item = by_id(run_eval(run, crit).guards)["crash_restart"]
+    assert item.outcome is Outcome.PASS
+    assert item.detail["source"] == "collect"
+    # run.json obs(inject 관측)가 있으면 그것이 먼저다
+    edit_json(run / "run.json", lambda d: {**d, "obs": {"crash_restart": 0}})
+    item = by_id(run_eval(run, crit).guards)["crash_restart"]
+    assert item.outcome is Outcome.FAIL
+    assert item.detail["source"] == "obs"
 
 
 def test_fault_effect_class_sub_counts_retry_paths(tmp_path):
