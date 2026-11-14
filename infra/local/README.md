@@ -37,7 +37,7 @@ infra/local/down.sh            # 삭제
 | --- | --- | --- |
 | 1 | 수집기 (C) | 이미지 빌드 → kind 로드 → `infra/k8s/collector/` 적용 |
 | 2 | 주문 서비스 (D) | `workloads/order/deploy-local.sh` 그대로 호출 |
-| 3 | 데모 화면 (E) | `web/deploy-local.sh`가 있을 때만 |
+| 3 | 푸시 서버 (C) + 데모 화면 (E) | `web/deploy-local.sh`가 정식 `push-server`를 먼저 배포한 뒤 nginx 연결 |
 
 | 환경 변수 | 기본값 | 의미 |
 | --- | --- | --- |

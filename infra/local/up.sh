@@ -300,7 +300,7 @@ verify_apps() {
     echo "주문 모드: 외부 (주문 서비스 → adapter → mock-broker)"
   fi
 
-  k -n exchange get pods -l 'app in (collector, order, web, dev-push, adapter, mock-broker)'
+  k -n exchange get pods -l 'app in (collector, order, web, push-server, adapter, mock-broker)'
 }
 
 # 지금 시세를 누가 쓰고 있는지 (요약 출력용)

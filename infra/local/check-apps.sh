@@ -112,7 +112,7 @@ k get pods -A -o wide > "$OUT/pods.txt" 2>&1
 
 # ---------------------------------------------------------------- 2. Pod
 step "2. 앱 Pod"
-apps=(collector order dev-push web)
+apps=(collector order push-server web)
 [ "$ADAPTER" = "1" ] && apps+=(adapter mock-broker)
 for app in "${apps[@]}"; do
   if k -n exchange wait --for=condition=Ready pod -l "app=$app" --timeout=60s >/dev/null 2>&1; then
