@@ -131,6 +131,15 @@ EXPECTED_COLUMNS: Mapping[str, Mapping[str, str]] = {
         "filled_at": "timestamp with time zone",
     },
 }
+STATUS_CHECK = (
+    "CHECK ((status = ANY (ARRAY['accepted'::text, 'pending'::text, "
+    "'filled'::text, 'rejected'::text])))"
+)
+# adapter 모드(external_schema.sql)는 'unknown'을 더한다. unknown은 filled가 아니라 불변식에 영향이 없다
+STATUS_CHECK_ADAPTER = (
+    "CHECK ((status = ANY (ARRAY['accepted'::text, 'pending'::text, "
+    "'filled'::text, 'rejected'::text, 'unknown'::text])))"
+)
 EXPECTED_CONSTRAINTS: Mapping[str, tuple[str, ...]] = {
     "accounts": (
         "PRIMARY KEY (user_id)",
@@ -146,12 +155,12 @@ EXPECTED_CONSTRAINTS: Mapping[str, tuple[str, ...]] = {
         "UNIQUE (client_order_id)",
         "CHECK ((side = ANY (ARRAY['bid'::text, 'ask'::text])))",
         "CHECK ((volume > (0)::numeric))",
-        "CHECK ((status = ANY (ARRAY['accepted'::text, 'pending'::text, "
-        "'filled'::text, 'rejected'::text])))",
+        STATUS_CHECK,
         "CHECK (((status <> 'filled'::text) OR ((fill_price IS NOT NULL) AND "
         "(amount IS NOT NULL) AND (filled_at IS NOT NULL))))",
     ),
 }
+ALSO_ACCEPTED: Mapping[str, tuple[str, ...]] = {STATUS_CHECK: (STATUS_CHECK_ADAPTER,)}
 
 
 # ---------------------------------------------------------------- 공용
@@ -603,7 +612,7 @@ def check_constraints(db: DbSnapshot) -> InvariantResult:
         have = cons.get(t, [])
         for want in EXPECTED_CONSTRAINTS[t]:
             w = _norm(want)
-            if w in have:
+            if any(_norm(x) in have for x in (want, *ALSO_ACCEPTED.get(want, ()))):
                 continue
             near = next((h for h in have if h.startswith(w)), None)  # 예: ... NOT VALID
             drift.append(

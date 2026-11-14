@@ -27,6 +27,7 @@ from orchestrator.judge import db as D
 from orchestrator.judge import reasons as R
 from orchestrator.judge.criteria import load_criteria
 from orchestrator.judge.invariants import (
+    check_constraints,
     check_invariants,
     item_results,
     run_key_counts,
@@ -362,6 +363,17 @@ def test_schema_section_matches_factories_default_schema(fresh_db):
     _, snap = _snapshot()
     key = lambda s: (s.kind, s.table, s.name)  # noqa: E731
     assert sorted(snap.schema, key=key) == sorted(default_schema(), key=key)
+
+
+def test_adapter_schema_status_check_with_unknown_passes(fresh_db):
+    """adapter 모드 기동 SQL(external_schema.sql)을 적용한 DB도 스키마 검사를 통과한다."""
+    sql = ROOT / "workloads" / "order" / "app" / "external_schema.sql"
+    _psql(sql.read_text(encoding="utf-8"))
+    _, snap = _snapshot()
+    [status] = [s for s in snap.schema if s.name == "orders_status_check"]
+    assert "'unknown'" in status.detail
+    r = check_constraints(snap)
+    assert r.violations == 0 and r.reasons == ()
 
 
 def test_run_key_counts_use_full_key_format(fresh_db):
