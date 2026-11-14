@@ -79,6 +79,49 @@ GET /accounts/{user_id}의 krw/volume은 예약을 포함한 총 보유값이다
 외부 모드에서는 reserved_krw/available_krw와 포지션별 reserved_volume/available_volume이 추가된다.
 예약이 남아 있으면 로컬 모드에서도 이 필드를 보여준다. 조회는 동일 DB 스냅샷을 사용한다.
 
+## 포지션 조회 API
+
+`GET /accounts/{user_id}/positions`는 보유 포지션에 Redis 현재가를 붙여 평가금액과 손익을 계산한다.
+두 모드 모두 같은 형식이며, 계산은 서버에서 Decimal로 한다 (화면은 이 값을 그대로 표시).
+
+```json
+{
+  "user_id": "user-0001",
+  "krw": "9020000.0000",
+  "reserved_krw": "0",
+  "available_krw": "9020000.0000",
+  "positions": [
+    {
+      "market": "KRW-BTC",
+      "volume": "0.01000000",
+      "avg_price": "98000000.00000000",
+      "reserved_volume": "0",
+      "available_volume": "0.01000000",
+      "current_price": "99000000",
+      "price_status": "ok",
+      "valuation": "990000.0000",
+      "pnl": "10000.0000",
+      "pnl_rate": "1.02"
+    }
+  ],
+  "total_valuation": "990000.0000",
+  "total_assets": "10010000.0000"
+}
+```
+
+| 필드 | 계산 |
+| --- | --- |
+| valuation | 현재가 × 보유 수량 (예약 수량 포함), 소수점 4자리 버림 |
+| pnl | (현재가 − 평균 매수가) × 보유 수량, 소수점 4자리 버림 |
+| pnl_rate | (현재가 / 평균 매수가 − 1) × 100, 소수점 2자리 버림 (%) |
+| total_assets | krw + total_valuation |
+
+- 시세가 STALE_MS보다 오래됐거나(`stale_price`) 없거나 Redis에 닿지 않으면(`price_unavailable`)
+  그 포지션의 current_price/valuation/pnl/pnl_rate는 null이고, total_valuation/total_assets도 null이다.
+  오래된 가격으로 손익을 보여주지 않으며, 이때도 200과 보유 수량·원화는 반환한다.
+- 없는 사용자는 404/user_not_found, DB 연결 불가는 503/not_ready.
+- 보유 수량이 0인 마켓은 목록에 없다. 기존 `GET /accounts/{user_id}` 응답은 바꾸지 않았다.
+
 ## 실행/배포
 
 로컬은 기존 DB/Redis를 준비한 뒤 주문 서비스 가상환경에서 다음을 실행한다.
