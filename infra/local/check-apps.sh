@@ -178,6 +178,14 @@ echo "$body" | grep -q '"replayed": *true' && ok "같은 주문번호 재전송 
 acc="$(curl -s --max-time 5 "http://localhost:$WEB_PORT/api/accounts/$USER_ID")"
 echo "$acc" > "$OUT/account-after.json"
 echo "$acc" | grep -q 'KRW-BTC' && ok "계좌에 BTC 포지션" || bad "계좌에 포지션 없음: $acc"
+# 화면의 평가손익은 주문 서비스가 계산한 값을 그대로 씀 (GET /accounts/{user_id}/positions)
+pos="$(curl -s --max-time 5 "http://localhost:$WEB_PORT/api/accounts/$USER_ID/positions")"
+echo "$pos" > "$OUT/positions.json"
+if echo "$pos" | grep -q '"price_status": *"ok"' && echo "$pos" | grep -q '"pnl": *"'; then
+  ok "평가손익 API (positions) — 현재가 기준 손익 계산됨"
+else
+  bad "평가손익 API 응답에 손익이 없음: $pos"
+fi
 
 # ---------------------------------------------------------------- 6. 시세 끊김
 step "6. 시세 끊김 → stale_price 거절 → 복구"

@@ -208,7 +208,7 @@
         <dt id="reserved-label" hidden>체결 대기 예약</dt><dd id="reserved" class="num" hidden>-</dd>
         <dt>총 자산</dt><dd id="total" class="num">-</dd>
       </dl>
-      <p id="acct-hint" class="hint">평가손익 = (현재가 − 평균 매수가) × 보유 수량. 3초마다 계좌를 다시 읽어요.</p>
+      <p id="acct-hint" class="hint">평가손익은 주문 서비스가 현재가로 계산한 값이에요. 3초마다 다시 읽어요.</p>
     </section>
   </div>
 
@@ -569,17 +569,28 @@ $("submit").onclick = () => {
   send({ client_order_id: newOrderId(), user_id: userId(), market: MARKET, side: state.side, volume: v });
 };
 
-/* ---------- 계좌와 평가손익 ---------- */
+/* ---------- 계좌와 평가손익 ----------
+ * 평가금액·손익·수익률·총자산은 주문 서비스(GET /accounts/{user_id}/positions)가
+ * Redis 현재가로 계산한 값을 그대로 보여 준다. 화면에서 다시 계산하지 않는다.
+ * 시세가 오래됐거나 없으면 서버가 null을 주므로 "-"로 표시한다 (오래된 가격으로 손익을 보이지 않음).
+ */
+const PRICE_STATUS = {
+  stale_price: "시세가 오래돼서 평가손익을 계산하지 않았어요.",
+  price_unavailable: "현재가를 읽지 못해서 평가손익을 계산하지 않았어요.",
+};
 async function loadAccount() {
+  const user = userId();
   try {
-    const res = await fetch(`/api/accounts/${userId()}`, { cache: "no-store" });
+    const res = await fetch(`/api/accounts/${user}/positions`, { cache: "no-store" });
+    if (user !== userId()) return;  // 응답이 오는 사이 사용자를 바꾼 경우
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       $("acct-hint").textContent = `계좌를 읽지 못했습니다 (${body.reason || res.status}).`;
       return;
     }
     state.account = await res.json();
-    $("acct-hint").textContent = "평가손익 = (현재가 − 평균 매수가) × 보유 수량. 3초마다 계좌를 다시 읽어요.";
+    const pos = (state.account.positions || []).find((x) => x.market === MARKET);
+    $("acct-hint").textContent = (pos && PRICE_STATUS[pos.price_status]) || "평가손익은 주문 서비스가 현재가로 계산한 값이에요. 3초마다 다시 읽어요.";
     renderAccount();
   } catch (e) {
     $("acct-hint").textContent = "주문 서비스에 연결하지 못했습니다. 3초 뒤 다시 시도합니다.";
@@ -593,8 +604,7 @@ function renderAccount() {
   const vol = pos ? Number(pos.volume) : 0;
   const avg = pos ? Number(pos.avg_price) : 0;
   const krw = Number(a.krw);
-  // 화면 표시용 계산 (원 단위 반올림). 체결·잔고의 정확한 값은 서버의 문자열 금액이 기준
-  const price = state.price;
+  const has = (v) => v !== null && v !== undefined;  // 서버가 null이면 계산하지 않은 값
   set("volume-held", `${btc.format(vol)} BTC`);
   set("avg", vol ? `${won.format(avg)}원` : "-");
   set("krw", `${won.format(krw)}원`);
@@ -604,15 +614,18 @@ function renderAccount() {
   const hasRes = resKrw > 0 || resVol > 0;
   $("reserved-label").hidden = !hasRes; $("reserved").hidden = !hasRes;
   if (hasRes) set("reserved", [resKrw > 0 ? `${won.format(resKrw)}원` : "", resVol > 0 ? `${btc.format(resVol)} BTC` : ""].filter(Boolean).join(" · "));
-  if (price == null) { set("valuation", "-"); set("total", "-"); set("pl", "-", "pl"); return; }
-  const valuation = price * vol;
-  const pl = (price - avg) * vol;
+  // 총자산 = 원화 + 평가금액 (서버 계산). 시세를 못 읽으면 null
+  set("total", has(a.total_assets) ? `${won.format(Number(a.total_assets))}원` : "-");
+  if (!pos) {
+    set("valuation", has(a.total_assets) ? "0원" : "-");
+    set("pl", "보유 코인 없음", "pl"); $("pl-rate").textContent = ""; return;
+  }
+  set("valuation", has(pos.valuation) ? `${won.format(Number(pos.valuation))}원` : "-");
+  if (!has(pos.pnl)) { set("pl", "-", "pl"); $("pl-rate").textContent = ""; return; }
+  const pl = Number(pos.pnl);
   const cls = pl > 0 ? "up" : pl < 0 ? "down" : "";
-  set("valuation", `${won.format(valuation)}원`);
-  set("total", `${won.format(krw + valuation)}원`);
-  if (!vol) { set("pl", "보유 코인 없음", "pl"); $("pl-rate").textContent = ""; return; }
-  set("pl", `${pl >= 0 ? "+" : ""}${won.format(pl)}원`, "pl " + cls);
-  $("pl-rate").textContent = `${pl >= 0 ? "+" : ""}${(((price / avg) - 1) * 100).toFixed(2)}%`;
+  set("pl", `${pl > 0 ? "+" : ""}${won.format(pl)}원`, "pl " + cls);
+  $("pl-rate").textContent = has(pos.pnl_rate) ? `${Number(pos.pnl_rate) > 0 ? "+" : ""}${pos.pnl_rate}%` : "";
   $("pl-rate").className = "pl-rate num " + cls;
 }
 
