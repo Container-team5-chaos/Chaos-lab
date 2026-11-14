@@ -8,14 +8,17 @@ kubectl은 주입 가능한 runner로 부른다(테스트는 가짜 runner, 클�
 """
 
 import json
+import os
 import re
 import subprocess
 import time
 from pathlib import Path
 from typing import Callable, Sequence
 
-# 저장소 루트의 load/k6 (orchestrator/src/orchestrator/k6load.py 기준)
-K6_DIR = Path(__file__).resolve().parents[3] / "load" / "k6"
+# 실행기 이미지는 패키지를 site-packages에 설치해 저장소 경로가 없으므로 K6_DIR로 받는다
+K6_DIR = Path(
+    os.environ.get("K6_DIR") or Path(__file__).resolve().parents[3] / "load" / "k6"
+)
 DEFAULT_IMAGE = "grafana/k6:2.3.0"  # 공식 이미지(alpine: sh, cat, date, kill 포함)
 PROFILES = ("smoke", "steady", "accept", "demo")
 LATER_PROFILES = ("step", "replay")  # 2차

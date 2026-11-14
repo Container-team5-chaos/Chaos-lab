@@ -8,8 +8,13 @@ COPY orchestrator/src /app/orchestrator/src
 RUN pip install --no-cache-dir "/app/orchestrator[k8s]"
 
 COPY experiments /app/experiments
+COPY load/k6 /app/load/k6
+
+# k6 Job 시작(k6load)과 judge 증거 수집이 kubectl 명령을 부른다
+COPY --from=registry.k8s.io/kubectl:v1.35.3 /bin/kubectl /usr/local/bin/kubectl
 
 ENV ORCH_STATE_PATH=/var/lib/orchestrator/state.json \
+    K6_DIR=/app/load/k6 \
     PYTHONUNBUFFERED=1
 WORKDIR /var/lib/orchestrator
 
