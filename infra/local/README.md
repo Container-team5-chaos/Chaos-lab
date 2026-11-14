@@ -42,7 +42,8 @@ infra/local/down.sh            # 삭제
 | 환경 변수 | 기본값 | 의미 |
 | --- | --- | --- |
 | `PRICE_STUB` | 인프라만 `1`(수집기가 이미 있으면 `0`), `--with-apps` `0` | `1`이면 시세 stub도 띄움. 수집기 시세가 들어오면 stub은 영구히 멈춤(아래 참고) |
-| `ORDER_MODE` | 없음 | `baseline`이면 주문 서비스를 개선 전 설정으로 배포 |
+| `ORDER_MODE` | 없음 | `baseline`: 주문 서비스를 개선 전 설정으로 배포. `adapter`: 외부 주문 모드(아래) |
+| `MOCK_BROKER_DIR` | `workloads/mock-broker` | `ORDER_MODE=adapter`일 때 실행할 mock-broker `deploy-local.sh`의 폴더 |
 | `LITE` | `0` | `1`이면 Prometheus·Grafana·Chaos Mesh·metrics-server를 설치하지 않음. 앱 동작만 확인할 때 |
 
 - 수집기는 업비트에 접속해야 한다. 인터넷이 막힌 곳에서는 `PRICE_STUB=1 infra/local/up.sh --with-apps`로 실행한다.
@@ -51,6 +52,17 @@ infra/local/down.sh            # 삭제
   표시는 `up.sh`가 수집기 없이 stub을 배포할 때만 지우고, 멈춰 있던 stub을 다시 시작한다.
 - B의 판정기는 `ticks` 테이블로 체결가의 신선함을 확인한다. stub만 쓰면 `ticks`가 비어 이 항목이 판정 불가(NOT_EVALUATED)가 된다. 판정까지 확인하려면 `--with-apps`로 실제 수집기를 띄운다.
 - 이미지 3개를 빌드하므로 처음 실행은 몇 분 더 걸린다. 앱 코드를 바꾼 뒤 다시 실행하면 새 이미지로 재시작한다.
+
+### 외부 주문 모드 (`ORDER_MODE=adapter`)
+
+```bash
+ORDER_MODE=adapter infra/local/up.sh --with-apps
+```
+
+- mock-broker(C) → adapter(C) → 주문 서비스(`values-adapter.yaml`) 순서로 배포한다. 주문은 `202`(pending)로 접수되고 adapter가 mock-broker에 전달한 뒤 `filled`로 정산된다.
+- mock-broker의 `deploy-local.sh`가 없으면 **시작 전에 중단**한다. mock-broker 없이 외부 모드를 켜면 주문이 모두 `unknown`이 되어 예약 금액이 묶이고 `reset-db.sh`도 막힌다.
+- 외부 모드에서 즉시 체결 모드로 돌아갈 때(`ORDER_MODE` 없이 다시 실행), 확정되지 않은(pending/unknown) 외부 주문이 있으면 중단한다. 즉시 체결 모드에는 외부 주문을 정산할 worker가 없기 때문이다.
+- 데모 화면은 접수(202)를 "체결 대기"로 보여 주고, 주문 조회로 체결·거절을 확인한다. 대기 중 예약 금액은 "체결 대기 예약"에 표시된다.
 
 ### 자원이 부족할 때 (LITE)
 
@@ -86,6 +98,7 @@ LITE=1 infra/local/check-apps.sh          # 띄우고 확인까지
 | Grafana | - | `kubectl --context kind-chaos-lab -n monitoring port-forward svc/kps-grafana 3000:80` (admin / admin) |
 | Chaos Dashboard | - | `kubectl --context kind-chaos-lab -n chaos-mesh port-forward svc/chaos-dashboard 2333` |
 | 주문 API (`--with-apps`) | `order.exchange.svc.cluster.local:8000` | `kubectl --context kind-chaos-lab -n exchange port-forward svc/order 8000` |
+| adapter (`ORDER_MODE=adapter`) | `adapter.exchange.svc.cluster.local:8000` | `kubectl --context kind-chaos-lab -n exchange port-forward svc/adapter 8001:8000` |
 | 데모 화면 (`--with-apps`) | `web.exchange.svc.cluster.local:80` | `kubectl --context kind-chaos-lab -n exchange port-forward svc/web 8080:80` |
 
 ## 다른 역할이 알아야 할 것

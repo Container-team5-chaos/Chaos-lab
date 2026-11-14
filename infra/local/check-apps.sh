@@ -9,6 +9,7 @@
 #   SKIP_SMOKE=1   infra/local/smoke-test.sh 건너뜀
 #   PRICE_STUB=1   업비트 접속이 막힌 곳에서 stub 시세로 실행 (up.sh에 그대로 전달)
 #   LITE=1         자원이 부족할 때: Prometheus·Chaos Mesh 없이 띄움 (up.sh에 전달, smoke-test 자동 생략)
+#   ORDER_MODE=adapter  외부 주문 모드 (mock-broker·adapter 배포, 202 접수 → 조회로 체결 확인)
 # 결과: ~/chaos-test/<시각>/ 에 로그와 result.txt
 # 클러스터는 끝나도 지우지 않음 → 화면을 직접 볼 수 있음. 정리: bash infra/local/down.sh
 # 테스트 주문이 DB에 남음 → 실험 전 bash infra/local/reset-db.sh -y
@@ -59,6 +60,17 @@ ticks_count() {
     "SELECT count(*) FROM ticks" 2>/dev/null | tr -d '\r '
 }
 
+# 외부 모드: 주문 조회로 pending이 끝날 때까지 기다림 (최대 30초) → 마지막 응답 본문
+wait_settled() {
+  local body="" _
+  for _ in $(seq 1 30); do
+    body="$(curl -s --max-time 5 "http://localhost:$WEB_PORT/api/orders/$1")"
+    echo "$body" | grep -q '"status": *"pending"' || break
+    sleep 1
+  done
+  echo "$body"
+}
+
 order() { # client_order_id → 응답 본문 + 마지막 줄에 HTTP 코드
   curl -s --max-time 10 -w '\n%{http_code}' -H 'Content-Type: application/json' \
     -d "{\"client_order_id\":\"$1\",\"user_id\":\"$USER_ID\",\"market\":\"KRW-BTC\",\"side\":\"bid\",\"volume\":\"0.0001\"}" \
@@ -68,6 +80,8 @@ order() { # client_order_id → 응답 본문 + 마지막 줄에 HTTP 코드
 echo "레포: $ROOT" | tee "$RESULT"
 echo "결과: $OUT" | tee -a "$RESULT"
 [ "${LITE:-0}" = "1" ] && echo "모드: LITE (Prometheus·Chaos Mesh 없음)" | tee -a "$RESULT"
+ADAPTER=0
+[ "${ORDER_MODE:-}" = "adapter" ] && ADAPTER=1 && echo "주문: 외부 모드 (adapter → mock-broker)" | tee -a "$RESULT"
 
 # ---------------------------------------------------------------- 0. 준비
 step "0. 준비물"
@@ -98,7 +112,9 @@ k get pods -A -o wide > "$OUT/pods.txt" 2>&1
 
 # ---------------------------------------------------------------- 2. Pod
 step "2. 앱 Pod"
-for app in collector order dev-push web; do
+apps=(collector order dev-push web)
+[ "$ADAPTER" = "1" ] && apps+=(adapter mock-broker)
+for app in "${apps[@]}"; do
   if k -n exchange wait --for=condition=Ready pod -l "app=$app" --timeout=60s >/dev/null 2>&1; then
     ok "$app Ready ($(k -n exchange get pods -l "app=$app" --no-headers 2>/dev/null | wc -l | tr -d ' ')개)"
   else
@@ -144,7 +160,19 @@ step "5. 주문 (nginx 경유, $USER_ID, 0.0001 BTC 매수)"
 cid="test-$(date +%s)"
 r="$(order "$cid")"; code="${r##*$'\n'}"; body="${r%$'\n'*}"
 echo "$body" > "$OUT/order.json"
-[ "$code" = "200" ] && echo "$body" | grep -q '"filled"' && ok "주문 체결 (200)" || bad "주문 실패 ($code): $body"
+if [ "$ADAPTER" = "1" ]; then
+  # 외부 모드: 202 pending으로 접수 → 주문 조회로 filled 확인 (워커가 빠르면 POST에서 이미 filled일 수 있음)
+  if { [ "$code" = "202" ] && echo "$body" | grep -q '"status": *"pending"'; } || { [ "$code" = "200" ] && echo "$body" | grep -q '"status": *"filled"'; }; then
+    ok "외부 주문 접수 ($code)"
+  else
+    bad "외부 주문 접수 실패 ($code): $body"
+  fi
+  body="$(wait_settled "$cid")"
+  echo "$body" > "$OUT/order-settled.json"
+  echo "$body" | grep -q '"status": *"filled"' && ok "주문 조회 → 증권사 체결 확인 (filled)" || bad "30초 안에 체결되지 않음: $body"
+else
+  [ "$code" = "200" ] && echo "$body" | grep -q '"filled"' && ok "주문 체결 (200)" || bad "주문 실패 ($code): $body"
+fi
 r="$(order "$cid")"; code="${r##*$'\n'}"; body="${r%$'\n'*}"
 echo "$body" | grep -q '"replayed": *true' && ok "같은 주문번호 재전송 → replayed" || bad "재전송 응답 ($code): $body"
 acc="$(curl -s --max-time 5 "http://localhost:$WEB_PORT/api/accounts/$USER_ID")"
@@ -168,7 +196,8 @@ else
   for _ in $(seq 1 30); do age="$(redis_age_ms)" && [ "$age" -lt 5000 ] && break; age=""; sleep 2; done
   [ -n "$age" ] && ok "수집기 복구 후 시세 다시 신선함" || bad "수집기 복구 후에도 시세 없음"
   r="$(order "after-$(date +%s)")"; code="${r##*$'\n'}"
-  [ "$code" = "200" ] && ok "복구 후 주문 체결" || bad "복구 후 주문 실패 ($code)"
+  # 외부 모드는 202(접수)가 정상
+  if [ "$code" = "200" ] || { [ "$ADAPTER" = "1" ] && [ "$code" = "202" ]; }; then ok "복구 후 주문 성공 ($code)"; else bad "복구 후 주문 실패 ($code)"; fi
 fi
 
 # ---------------------------------------------------------------- 7. 기존 스모크 테스트

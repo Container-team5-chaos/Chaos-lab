@@ -11,7 +11,9 @@
 #   CLUSTER_NAME  기본 chaos-lab
 #   LITE          1이면 Prometheus·Grafana·Chaos Mesh·metrics-server를 설치하지 않음 (장애 주입·지표 수집 불가)
 #   PRICE_STUB    1이면 시세 stub 배포, 0이면 제거. 기본: 인프라만 1(수집기가 이미 있으면 0), --with-apps 0
-#   ORDER_MODE    baseline 이면 주문 서비스를 개선 전 설정으로 배포 (--with-apps 일 때)
+#   ORDER_MODE    (--with-apps 일 때) baseline: 주문 서비스를 개선 전 설정으로
+#                 adapter: mock-broker(C) → adapter(C) → 주문 서비스 외부 모드(202 접수 후 비동기 체결)
+#   MOCK_BROKER_DIR  mock-broker의 deploy-local.sh가 있는 폴더 (기본 workloads/mock-broker)
 set -euo pipefail
 
 CLUSTER_NAME="${CLUSTER_NAME:-chaos-lab}"
@@ -48,6 +50,12 @@ else
   PRICE_STUB="${PRICE_STUB:-1}"
 fi
 ORDER_MODE="${ORDER_MODE:-}"
+case "$ORDER_MODE" in "" | baseline | adapter) ;; *) die "ORDER_MODE는 baseline 또는 adapter (지금: $ORDER_MODE)" ;; esac
+MOCK_BROKER_DIR="${MOCK_BROKER_DIR:-$ROOT/workloads/mock-broker}"
+# mock-broker 없이 외부 모드를 켜면 주문이 전부 unknown이 되고 예약 금액이 묶여 reset-db도 막힘 → 시작 전에 중단
+if [ "$ORDER_MODE" = "adapter" ] && [ ! -f "$MOCK_BROKER_DIR/deploy-local.sh" ]; then
+  die "mock-broker 배포 스크립트가 없습니다 ($MOCK_BROKER_DIR/deploy-local.sh). mock-broker(C)가 준비된 뒤 ORDER_MODE=adapter 를 쓰세요"
+fi
 LITE="${LITE:-0}"
 
 # kubectl/helm 이 다른 클러스터를 건드리지 않도록 context 명시
@@ -204,11 +212,41 @@ deploy_collector() {
 }
 
 # 주문 서비스(D): D의 배포 스크립트를 그대로 사용
+# 외부 모드에서 아직 확정되지 않은(pending/unknown) 주문 수. 테이블이 없으면 0
+external_unsettled() {
+  local n
+  n="$(k -n exchange exec statefulset/postgres -- psql -U exchange -d exchange -tAc \
+    "SELECT CASE WHEN to_regclass('order_external') IS NULL THEN 0 ELSE
+       (SELECT count(*) FROM orders JOIN order_external USING (client_order_id)
+        WHERE status IN ('pending', 'unknown')) END" 2>/dev/null | tr -d '\r[:space:]')" || n=""
+  echo "${n:-0}"
+}
+
 deploy_order() {
-  log "주문 서비스 배포 (workloads/order/deploy-local.sh${ORDER_MODE:+ $ORDER_MODE})"
+  log "주문 서비스 배포 (workloads/order/deploy-local.sh${ORDER_MODE:+, $ORDER_MODE})"
   local args=()
-  [ "$ORDER_MODE" = "baseline" ] && args=(baseline)
+  case "$ORDER_MODE" in
+    baseline) args=(baseline) ;;
+    adapter) args=(-f "$ROOT/workloads/order/chart/values-adapter.yaml") ;;
+    *)
+      # 외부 모드 → 즉시 체결 모드로 바꾸면 남은 외부 주문을 정산할 worker가 사라짐 (주문 서비스 README)
+      local n
+      n="$(external_unsettled)"
+      if [ "$n" != "0" ] && k -n exchange get deployment adapter >/dev/null 2>&1; then
+        die "확정되지 않은 외부 주문 ${n}건이 있어 즉시 체결 모드로 바꾸지 않습니다. ORDER_MODE=adapter 로 실행해 정산을 마치거나 상태를 먼저 확인하세요"
+      fi
+      ;;
+  esac
   CLUSTER_NAME="$CLUSTER_NAME" bash "$ROOT/workloads/order/deploy-local.sh" "${args[@]+"${args[@]}"}"
+}
+
+# ORDER_MODE=adapter: mock-broker(C) → adapter(C) 순서로 먼저 배포
+deploy_external() {
+  [ "$ORDER_MODE" = "adapter" ] || return 0
+  log "mock-broker 배포 ($MOCK_BROKER_DIR/deploy-local.sh)"
+  CLUSTER_NAME="$CLUSTER_NAME" bash "$MOCK_BROKER_DIR/deploy-local.sh"
+  log "adapter 배포 (workloads/adapter/deploy-local.sh)"
+  CLUSTER_NAME="$CLUSTER_NAME" bash "$ROOT/workloads/adapter/deploy-local.sh"
 }
 
 # 데모 화면(E): web/이 아직 없는 브랜치에서는 건너뜀
@@ -255,7 +293,14 @@ verify_apps() {
     warn "ticks에 최근 30초 시세가 없습니다. 수집기 로그를 확인하세요 (B의 fresh 판정은 NOT_EVALUATED가 됨)"
   fi
 
-  k -n exchange get pods -l 'app in (collector, order, web, dev-push)'
+  if [ "$ORDER_MODE" = "adapter" ]; then
+    k -n exchange wait --for=condition=Ready pod -l app=adapter --timeout=60s >/dev/null || die "adapter가 Ready가 아닙니다"
+    k -n exchange get service mock-broker >/dev/null 2>&1 \
+      || warn "mock-broker Service가 없습니다. adapter는 http://mock-broker.exchange.svc.cluster.local:8000 으로 연결합니다"
+    echo "주문 모드: 외부 (주문 서비스 → adapter → mock-broker)"
+  fi
+
+  k -n exchange get pods -l 'app in (collector, order, web, dev-push, adapter, mock-broker)'
 }
 
 # 지금 시세를 누가 쓰고 있는지 (요약 출력용)
@@ -303,6 +348,9 @@ EOF
     cat <<EOF
     kubectl --context $CONTEXT -n exchange port-forward svc/order 8000           # 주문 API
 EOF
+    [ "$ORDER_MODE" = "adapter" ] && cat <<EOF
+    kubectl --context $CONTEXT -n exchange port-forward svc/adapter 8001:8000    # adapter (외부 주문 전달 상태)
+EOF
     [ -f "$ROOT/web/deploy-local.sh" ] && cat <<EOF
     kubectl --context $CONTEXT -n exchange port-forward svc/web 8080:80          # 데모 화면 http://localhost:8080
 EOF
@@ -328,6 +376,7 @@ install_data
 install_price_stub
 if [ "$WITH_APPS" = "1" ]; then
   deploy_collector
+  deploy_external
   deploy_order
   deploy_web
 fi
