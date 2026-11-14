@@ -1,0 +1,35 @@
+# 시나리오 형식 초안
+# 증권사(mock-broker) 응답 유실: mock-broker → adapter 방향 패킷을 모두 버린다.
+# 요청은 증권사에 도착해 처리될 수 있지만 adapter는 응답을 못 받고 시간 초과가 난다.
+# = "체결은 됐는데 응답이 사라진" 상황
+# 확인할 것: 단절 중 주문은 pending으로 남고(미체결로 단정하지 않음),
+#           복구 뒤 같은 주문 키로 조회해 한 번만 체결·정산되는지 (중복 체결·이중 차감 없음)
+#           MAX_ATTEMPTS(기본 8)를 넘기면 unknown이 되어 예약이 묶이므로 observe를 너무 길게 잡지 않는다
+#
+# 대상 라벨·보호 조건은 broker-delay.yaml과 같다.
+name: broker-partition
+durations:   # 초
+  warmup: 30
+  observe: 30
+  recover: 60
+faults:
+  - kind: NetworkChaos
+    spec:
+      action: partition
+      mode: all
+      selector:
+        namespaces: [exchange]
+        labelSelectors:
+          app: mock-broker
+      direction: to
+      target:
+        mode: all
+        selector:
+          namespaces: [exchange]
+          labelSelectors:
+            app: adapter
+
+# 시나리오 6 판정: adapter 대기열이 장애 중 쌓였다가 회복 후 평소 수준으로 빠지는지 본다(orchestrator/README.md)
+drain:
+  query: sum(adapter_queue_depth)
+  timeout_s: 300

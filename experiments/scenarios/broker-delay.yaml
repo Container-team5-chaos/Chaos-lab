@@ -1,0 +1,39 @@
+# 시나리오 형식 초안
+# 증권사(mock-broker) 응답 지연: mock-broker → adapter 방향 패킷만 2초 늦춘다.
+# adapter의 BROKER_TIMEOUT_SECONDS(기본 5초)보다 짧아 시간 초과 없이 "느린 증권사"를 만든다.
+# 확인할 것: 주문은 202로 바로 접수되고, 체결(filled)까지 시간이 늘어나도 중복·누락 없이 정산되는지
+#
+# 대상 라벨 app=mock-broker, app=adapter
+# 주입기가 selector·target 모두에 보호 Pod·k6 제외 조건을 붙인다.
+# target(adapter Pod IP)으로 범위를 좁혀 mock-broker의 다른 통신은 건드리지 않는다.
+# (adapter → Service(ClusterIP) 방향은 Pod IP로 걸러지지 않아, 응답 방향인 mock-broker 쪽에 건다)
+name: broker-delay
+durations:   # 초
+  warmup: 30
+  observe: 60
+  recover: 30
+faults:
+  - kind: NetworkChaos
+    spec:
+      action: delay
+      mode: all
+      selector:
+        namespaces: [exchange]
+        labelSelectors:
+          app: mock-broker
+      direction: to
+      target:
+        mode: all
+        selector:
+          namespaces: [exchange]
+          labelSelectors:
+            app: adapter
+      delay:
+        latency: 2s
+        jitter: 200ms
+        correlation: "0"
+
+# 시나리오 6 판정: adapter 대기열이 장애 중 쌓였다가 회복 후 평소 수준으로 빠지는지 본다(orchestrator/README.md)
+drain:
+  query: sum(adapter_queue_depth)
+  timeout_s: 300

@@ -4,6 +4,9 @@
 - Chaos 리소스 이름은 실험 ID와 단계로 결정적으로 만든다 → 재시도해도 중복 생성되지 않는다.
 - 모든 리소스에 LABEL_KEY=<run_id> 라벨을 붙인다 → 재시작 후 라벨로 찾아서 지운다.
 - 보호 Pod(DB·Redis·시세 stub)와 k6 Pod는 시나리오와 상관없이 항상 대상에서 뺀다.
+  NetworkChaos의 상대편(target)에도 같은 조건을 붙인다.
+- 만들기 전에 범위를 검사한다(check_fault). namespace가 없거나, NetworkChaos가 상대를 정하지 않아
+  Pod의 모든 통신(DB 포함)을 건드리게 되는 spec은 거부한다.
 - 정리는 리소스가 실제로 사라질 때까지 확인한다. 기한 안에 안 사라지면 CleanupIncomplete.
 """
 
@@ -25,14 +28,52 @@ SAFETY_EXPRESSIONS = (
 )
 
 
-def with_safety_selector(spec: dict) -> dict:
-    """spec.selector에 제외 조건을 더한 복사본. 원본은 그대로 두고, 여러 번 불러도 중복되지 않는다."""
-    spec = copy.deepcopy(spec)
-    exprs = spec.setdefault("selector", {}).setdefault("expressionSelectors", [])
+def _add_safety(selector: dict) -> None:
+    exprs = selector.setdefault("expressionSelectors", [])
     for expr in SAFETY_EXPRESSIONS:
         if expr not in exprs:
             exprs.append(copy.deepcopy(expr))
+
+
+def with_safety_selector(spec: dict) -> dict:
+    """spec.selector(와 NetworkChaos의 target.selector)에 제외 조건을 더한 복사본.
+
+    원본은 그대로 두고, 여러 번 불러도 중복되지 않는다.
+    target은 있을 때만 건드린다 (없는 target을 만들면 장애 범위가 바뀜).
+    """
+    spec = copy.deepcopy(spec)
+    _add_safety(spec.setdefault("selector", {}))
+    target = spec.get("target")
+    if isinstance(target, dict):
+        _add_safety(target.setdefault("selector", {}))
     return spec
+
+
+NETWORK_DIRECTIONS = ("to", "from", "both")
+
+
+def check_fault(fault: dict) -> None:
+    """주입 전에 장애 범위를 검사한다. 문제가 있으면 ValueError (아무것도 만들지 않음).
+
+    - kind는 PodChaos/NetworkChaos
+    - selector.namespaces 필수 → 다른 namespace(모니터링·Chaos Mesh 등)로 번지지 않게
+    - NetworkChaos는 direction과 상대(target 또는 externalTargets) 필수
+      → 상대가 없으면 대상 Pod의 모든 통신(DB·Redis 포함)이 지연/단절돼 무엇을 실험했는지 흐려짐
+    """
+    kind = fault.get("kind")
+    if kind not in KIND_PLURALS:
+        raise ValueError(f"지원하지 않는 장애 종류: {kind!r}")
+    spec = fault.get("spec") or {}
+    if not (spec.get("selector") or {}).get("namespaces"):
+        raise ValueError(f"{kind}: spec.selector.namespaces가 필요함")
+    if kind == "NetworkChaos":
+        if spec.get("direction") not in NETWORK_DIRECTIONS:
+            raise ValueError("NetworkChaos: direction은 to/from/both 중 하나여야 함")
+        target = spec.get("target")
+        if not target and not spec.get("externalTargets"):
+            raise ValueError("NetworkChaos: target 또는 externalTargets가 필요함")
+        if target and not (target.get("selector") or {}).get("namespaces"):
+            raise ValueError("NetworkChaos: target.selector.namespaces가 필요함")
 
 
 class CleanupIncomplete(RuntimeError):
@@ -124,6 +165,7 @@ class ChaosMeshInjector:
         self.clock = clock
 
     def apply(self, run_id: str, step: int, fault: dict) -> str:
+        check_fault(fault)
         kind = fault["kind"]
         name = chaos_name(run_id, step)
         body = {

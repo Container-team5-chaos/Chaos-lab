@@ -1,6 +1,6 @@
 """판정 파이프라인: collect → evaluate(설계 5.1, 5.2, 5.6, 5.7, 5.8).
 
-- collect(ctx, crit, tr): 클러스터를 만지는 유일한 함수다. 1차 스텁이다.
+- collect(ctx, crit, tr): 클러스터를 만지는 유일한 함수다. 구현은 gather.py다.
 - evaluate(ctx, crit, evidence): 증거 폴더만 읽는 순수 함수다. 네트워크와 현재 시각을 쓰지 않는다.
   시각은 증거와 run.json 값만 쓴다. generated_at만 호출자가 넘긴다(digest 밖).
 - assess: evaluate와 같고 classified 행도 돌려준다. render_outputs는 verdict.json·report.md·
@@ -14,6 +14,7 @@
     k6/sha256sum.txt                      원격 sha256sum 출력. 없으면 sha256 미검증
     k6/derived.json                       노드 − 노트북 시계 차이. 없으면 표지 기준 구간은 NOT_EVALUATED
     raw/db/snapshot.txt                   psql 출력(--@ 구획 + COPY CSV, 계약 명세 6)
+    raw/k8s/obs.json                      collect의 Pod 관측(pod_replaced, crash_restart). 선택
 
 판정 순서
 1. 증거를 읽는다. judge가 만드는 파일(pod-status, derived, sha256sum, snapshot)의 형식이 틀리면
@@ -36,7 +37,7 @@
      required: false면 보고만 한다.
 5. 가드(설계 5.6, 계약 명세 8). 구현한 것: safety(종목·user_id 형식·run 키·1 VU = 1 user·비밀 키),
    account_set, fill_coverage, sell_coverage(ask 체결), load_coverage, fault_in_load,
-   fault_effect(class_sub는 분류 결과, observe는 run.json·marks.local의 obs 값), db_quiescent.
+   fault_effect(class_sub는 분류 결과, observe는 run.json·marks.local의 obs 값, 없으면 raw/k8s/obs.json), db_quiescent.
    그 밖(2차 WS 가드)은 NOT_EVALUATED다.
    표지 기준 구간과 fault_in_load는 시계 차이를 모르면(derived.json 없음) NOT_EVALUATED다.
    log_complete는 required=false로 덧붙인다.
@@ -169,6 +170,8 @@ POD_STATUS_PATH = f"{LOCAL_K6_DIR}/{POD_STATUS_NAME}"
 REMOTE_SHA_PATH = f"{LOCAL_K6_DIR}/{REMOTE_SHA_NAME}"
 DERIVED_PATH = f"{LOCAL_K6_DIR}/{DERIVED_NAME}"
 DB_SNAPSHOT = "raw/db/snapshot.txt"
+# collect(gather.observe_pods)의 pod_replaced·crash_restart
+POD_OBS_PATH = "raw/k8s/obs.json"
 
 # runs/<run_id>/ 산출물(설계 5.2). CLI가 쓴다
 VERDICT_NAME = "verdict.json"
@@ -227,6 +230,7 @@ class Evidence:
     summary_token_key: 읽지 못한 summary 원문에서 "...token"·"...authorization" 키를 찾았다
       (계약 명세 8 safety).
     clock_offset_ms: None이면 시계 차이를 모른다(derived.json 없음).
+    k6_stop_requested: pod-status.json stop_requested(fetch가 /out/STOP_REQUESTED를 봤다).
     """
 
     log: K6Log | None
@@ -236,9 +240,11 @@ class Evidence:
     remote_sha: str | None = None
     clock_offset_ms: int | None = None
     db: DbSnapshot | None = None
+    pod_obs: Mapping[str, Any] = field(default_factory=dict, hash=False)
     manifest: Mapping[str, str | None] = field(default_factory=dict, hash=False)
     summary_error: str | None = None
     summary_token_key: bool = False
+    k6_stop_requested: bool = False
 
     @property
     def manifest_sha256(self) -> str:
@@ -352,9 +358,12 @@ def load_evidence(evidence: str | Path) -> Evidence:
 
     code: int | None = None
     reason: str | None = None
+    stop_requested = False
     pod_raw = _read(root, POD_STATUS_PATH, manifest)
     if pod_raw is not None:
-        code, reason = _pod_exit(_json_obj(pod_raw, POD_STATUS_PATH), POD_STATUS_PATH)
+        pod_doc = _json_obj(pod_raw, POD_STATUS_PATH)
+        code, reason = _pod_exit(pod_doc, POD_STATUS_PATH)
+        stop_requested = pod_doc.get("stop_requested") is True
 
     offset: int | None = None
     derived_raw = _read(root, DERIVED_PATH, manifest)
@@ -367,6 +376,11 @@ def load_evidence(evidence: str | Path) -> Evidence:
     db_raw = _read(root, DB_SNAPSHOT, manifest)
     db = None if db_raw is None else parse_bundle_output(_text(db_raw, DB_SNAPSHOT))
 
+    # run.json obs로도 받는 선택 파일이라 없으면 manifest에 넣지 않는다
+    pod_obs: dict[str, Any] = {}
+    if (root / POD_OBS_PATH).is_file():
+        pod_obs = _json_obj(_read(root, POD_OBS_PATH, manifest), POD_OBS_PATH)
+
     return Evidence(
         log=log,
         summary=summary,
@@ -375,9 +389,11 @@ def load_evidence(evidence: str | Path) -> Evidence:
         remote_sha=remote,
         clock_offset_ms=offset,
         db=db,
+        pod_obs=pod_obs,
         manifest=dict(sorted(manifest.items())),
         summary_error=summary_error,
         summary_token_key=summary_token,
+        k6_stop_requested=stop_requested,
     )
 
 
@@ -432,6 +448,15 @@ def account_scope(
 # ---------------------------------------------------------------- 판정 상태
 
 
+def _stopped_by_judge(ctx: RunContext, ev: Evidence) -> bool:
+    """우리가 k6를 SIGINT로 멈췄다(종료 코드 105 인정, 설계 4.8).
+
+    근거는 둘 중 하나다: run.json obs.stopped_by_judge(사람이 적음) 또는
+    pod-status.json stop_requested(정지 전에 만든 /out/STOP_REQUESTED를 fetch가 봄).
+    """
+    return ctx.obs.get("stopped_by_judge") is True or ev.k6_stop_requested
+
+
 @dataclass(frozen=True)
 class _State:
     ctx: RunContext
@@ -462,7 +487,7 @@ class _State:
 
     @property
     def stopped_by_judge(self) -> bool:
-        return self.ctx.obs.get("stopped_by_judge") is True
+        return _stopped_by_judge(self.ctx, self.ev)
 
 
 def _meta(spec: Mapping[str, Any], kind: str, ov: str) -> tuple[str, str, bool, str]:
@@ -1037,12 +1062,14 @@ def _fault_effect_item(st: _State, item: Mapping[str, Any]) -> CheckResult:
         r = evaluate_count_check(item, counts, features=st.features)
         return replace(r, detail={**r.detail, "account": sel})
     observe = str(item["observe"])
-    v = st.ctx.obs.get(observe)
+    # run.json·marks.local obs(inject 관측)가 먼저, 없으면 collect의 Pod 관측(설계 5.2 4단계)
+    source = "obs" if st.ctx.obs.get(observe) is not None else "collect"
+    v = st.ctx.obs.get(observe) if source == "obs" else st.ev.pod_obs.get(observe)
     if isinstance(v, bool):
         v = int(v)
     if not _plain_int(v):
         note = (
-            f"Pod 관측값 obs.{observe}가 없다(설계 5.2 4단계 collect는 1차 미구현). "
+            f"Pod 관측값 {observe}가 run.json obs에도 {POD_OBS_PATH}에도 없다. "
             f"judge mark --obs {observe}=<건수>로 넣는다"
         )
         return _result(
@@ -1054,7 +1081,7 @@ def _fault_effect_item(st: _State, item: Mapping[str, Any]) -> CheckResult:
         )
     r = evaluate_count_check(item, {observe: v}, features=st.features)
     return replace(
-        r, detail={**r.detail, "target": item.get("target"), "source": "obs"}
+        r, detail={**r.detail, "target": item.get("target"), "source": source}
     )
 
 
@@ -1215,6 +1242,7 @@ def _load(st: _State) -> dict[str, Any]:
         "k6_exit_code": st.ev.k6_exit_code,
         "k6_exit_reason": st.ev.k6_exit_reason,
         "stopped_by_judge": st.stopped_by_judge,
+        "k6_stop_requested": st.ev.k6_stop_requested,
         "profile": rs.profile if rs is not None else None,
         "vus": rs.vus if rs is not None else None,
         "plan_duration_ms": plan_duration_ms(rs.plan) if rs is not None else None,
@@ -1335,7 +1363,13 @@ def assess(
         lc = _missing_log_check()
     else:
         sha_ok = None if ev.remote_sha is None else sha_matches(log, ev.remote_sha)
-        lc = log_complete(log, ev.summary, ev.k6_exit_code, sha_ok)
+        lc = log_complete(
+            log,
+            ev.summary,
+            ev.k6_exit_code,
+            sha_ok,
+            stopped=_stopped_by_judge(ctx, ev),
+        )
         if ev.summary_error is not None:
             why = dict(lc.detail.get("why", {}))
             why[COND_COUNTERS] = f"summary.json을 읽지 못했다({ev.summary_error})"
@@ -1472,20 +1506,14 @@ def render_outputs(a: Assessment) -> dict[str, str]:
 
 
 def collect(ctx: RunContext, crit: Criteria, tr: Transports) -> Path:
-    """클러스터를 만지는 유일한 함수(설계 5.1, 5.2). 1차 스텁이다.
+    """클러스터를 만지는 유일한 함수(설계 5.1, 5.2). 구현과 단계 설명은 gather.py다.
 
-    순서(설계 5.2)
-    1. fetch(4.8): k6 Pod를 찾고 terminated를 기다린다. k6/pod-status.json, k6/sha256sum.txt,
-       k6/orders.jsonl.gz, k6/summary.json, k6/derived.json을 쓴다.
-    2. 정지 확인: k6 종료 뒤 10s 기다린다.
-    3. DB(계약 명세 6): db.build_bundle(ctx, stale_ms=integrity_cfg(crit).stale_ms) →
-       db.exec_bundle(tr, bundle, target=ctx.db)(psql 1회, 비밀번호 없음). 출력은 raw/db/snapshot.txt.
-       F1 ≠ F2면 30s 뒤 한 번 더. psql 실패(TransportError)는 잡아 빠진 구획(DB_ERROR)으로 남긴다.
-    4. Pod 관측: kubectl get pods -o json을 raw/k8s/에 남기고 pod_replaced·crash_restart를 만든다.
-    5. RELEASE(fetch.release), evidence.json(파일별 sha256), criteria.resolved.yaml.
+    fetch → 정지 확인 → psql(지문이 다르면 한 번 더) → Pod 관측 → RELEASE·resolved·evidence.json.
     돌려주는 값은 증거 폴더(runs/<run_id>/)다.
     """
-    raise NotImplementedError("설계 5.2, 1차")
+    from .gather import collect as _collect
+
+    return _collect(ctx, crit, tr)
 
 
 def _criteria_for(ctx: RunContext, *, prefer_resolved: bool) -> Criteria:
