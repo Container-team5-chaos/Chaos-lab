@@ -106,7 +106,7 @@ D1 = 그 키의 orders 행이 있다. "일치" = 원 응답 필드가 DB 행과 
 | `avg` | 모든 (user, market): 주문을 id 순으로 서비스 공식대로 재생한 avg = positions.avg_price |
 | `nonneg` | krw, volume, avg_price ≥ 0 |
 | `arith` | `amount = ROUND_DOWN(fill_price × volume, 4)` |
-| `constraints` | 필요한 테이블·열, `client_order_id` UNIQUE, CHECK 제약이 있다. 다르면 SCHEMA_DRIFT(INCONCLUSIVE) |
+| `constraints` | 필요한 테이블·열, `client_order_id` UNIQUE, CHECK 제약이 있다. 다르면 SCHEMA_DRIFT(INCONCLUSIVE). status CHECK는 기본 4값과 adapter 모드의 5값(`unknown` 추가)을 모두 받는다 |
 | `fresh` | (선택) 같은 종목 tick 중 price = fill_price이고 received_at ∈ [filled_at − stale_ms − 1s, filled_at + 1s]인 것이 있다. ticks가 비면 평가하지 않는다 |
 
 - `initial_krw`(기본 `"10000000"`, seed)와 `stale_ms`(기본 5000)는 기준 파일 `integrity`에서 바꾼다.

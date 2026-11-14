@@ -21,6 +21,7 @@ from orchestrator.judge.invariants import (
     EXPECTED_CONSTRAINTS,
     EXPECTED_TABLES,
     ROW_BASED,
+    STATUS_CHECK_ADAPTER,
     Scope,
     check_arith,
     check_avg,
@@ -449,6 +450,25 @@ def test_constraints_not_valid_check_is_drift_and_shows_near_definition():
     r = check_constraints(make_db(schema=schema))
     [v] = r.examples
     assert v.actual == "CHECK ((krw >= (0)::numeric)) NOT VALID"
+
+
+def with_status_check(detail):
+    return tuple(
+        dataclasses.replace(s, detail=detail) if s.name == "orders_status_check" else s
+        for s in default_schema()
+    )
+
+
+def test_constraints_accept_adapter_status_check_with_unknown():
+    r = check_constraints(make_db(schema=with_status_check(STATUS_CHECK_ADAPTER)))
+    assert r.violations == 0 and r.reasons == ()
+
+
+def test_constraints_other_extra_status_is_drift():
+    other = STATUS_CHECK_ADAPTER.replace("'unknown'", "'cancelled'")
+    r = check_constraints(make_db(schema=with_status_check(other)))
+    assert r.reasons == (R.SCHEMA_DRIFT,)
+    assert [v.detail["problem"] for v in r.examples] == ["constraint_missing"]
 
 
 def test_constraints_ignore_names_extras_whitespace_and_ticks():
