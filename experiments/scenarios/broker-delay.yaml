@@ -32,3 +32,8 @@ faults:
         latency: 2s
         jitter: 200ms
         correlation: "0"
+
+# 시나리오 6 판정: adapter 대기열이 장애 중 쌓였다가 회복 후 평소 수준으로 빠지는지 본다(orchestrator/README.md)
+drain:
+  query: sum(adapter_queue_depth)
+  timeout_s: 300

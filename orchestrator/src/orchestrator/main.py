@@ -24,6 +24,7 @@ from .gates import (
 )
 from .inject import MockInjector
 from .judging import ChaosJudge, MockJudge
+from .metrics import NoMetrics, PromQuery
 from .k6load import K6JobLoad
 from .observe import MockLoad
 from .report import summary
@@ -65,7 +66,7 @@ def main(argv=None) -> int:
     injector, load, judge = _build(args.mock, args.namespace)
 
     if args.cmd == "recover":
-        state = recover(store, injector)
+        state = recover(store, injector, load=load)
         print(summary(state) if state else "정리할 실험 없음")
         return 0
 
@@ -77,8 +78,9 @@ def main(argv=None) -> int:
 
     scenario = yaml.safe_load(Path(args.scenario).read_text(encoding="utf-8")) or {}
     if args.mock:
-        watch, gate = AlwaysHealthy(), AlwaysOpen()
+        watch, gate, metrics = AlwaysHealthy(), AlwaysOpen(), NoMetrics()
     else:
+        metrics = PromQuery(args.prometheus) if args.prometheus else PromQuery()
         watch = (
             PrometheusWatch(args.prometheus) if args.prometheus else PrometheusWatch()
         )
@@ -94,7 +96,14 @@ def main(argv=None) -> int:
     if args.no_gate:
         gate = AlwaysOpen()
     runner = Runner(
-        store, injector, load, judge, gate, watch=watch, runs_dir=args.runs_dir
+        store,
+        injector,
+        load,
+        judge,
+        gate,
+        watch=watch,
+        runs_dir=args.runs_dir,
+        metrics=metrics,
     )
     try:
         state = runner.run(scenario, run_id=args.run_id, scenario_path=args.scenario)
