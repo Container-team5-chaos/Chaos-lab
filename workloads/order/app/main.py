@@ -17,6 +17,7 @@ from . import config, external
 from .adapter_client import AdapterClient
 from .metrics import DURATION, EXTERNAL_ACCEPTED, ORDERS, REPLAYED
 from .orders import Rejected, get_account, place_order
+from .positions import get_positions
 from .schemas import OrderRequest, dec, order_to_dict
 
 
@@ -182,6 +183,18 @@ async def read_account(user_id: str, request: Request):
                 available_volume=dec(pos["volume"] - pos["reserved_volume"]),
             )
     return body
+
+
+@app.get("/accounts/{user_id}/positions")
+async def read_positions(user_id: str, request: Request):
+    try:
+        return await get_positions(
+            request.app.state.pool, request.app.state.redis, user_id
+        )
+    except Rejected as r:
+        return JSONResponse(status_code=r.http_status, content={"reason": r.reason})
+    except (OSError, asyncpg.PostgresConnectionError, TimeoutError):
+        return JSONResponse(status_code=503, content={"reason": "not_ready"})
 
 
 @app.get("/healthz")
